@@ -63,7 +63,8 @@ async function summarizeQuery(text, openaiKey) {
               "Condense it into a concise GitHub issue search query that captures the core meaning. " +
               "The query MUST be under 256 characters. Do NOT use double quotes in the output. " +
               "Output ONLY the search query text, nothing else." +
-              "Don't return the word Metabase or the version number in the query.",
+              "Don't return the word Metabase or the version number in the query." + 
+              "Don't return dashboard, question, model, table or column names as they don't help with the search, just on the core problem",
           },
           { role: "user", content: text },
         ],
@@ -122,8 +123,31 @@ function hideSummarizeNotice() {
   noticeEl.innerHTML = "";
 }
 
-function buildQuery(text, scopeType, scopeValue) {
-  let q = text + " is:issue";
+function showQueryAdjustedNotice(message, adjustedQuery) {
+  noticeEl.innerHTML = `
+    <strong>${escapeHtml(message)}</strong> &mdash;
+    Searching for: <em>${escapeHtml(adjustedQuery)}</em>
+  `;
+  noticeEl.classList.add("visible");
+}
+
+// GitHub issue search treats ()[]{}:; etc. as syntax. We strip them (never quote) so hybrid/semantic search is not forced to lexical exact-phrase mode.
+const GITHUB_SEARCH_SPECIAL = /[()[\]{}<>@#;:/\\]|"(?:[^"\\]|\\.)*"/;
+
+function sanitizeGitHubSearchText(text) {
+  return text
+    .replace(/[()[\]{}<>@#;:/\\"]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildQuery(text, scopeType, scopeValue, { sanitize = false } = {}) {
+  const trimmed = text.trim();
+  const searchPart =
+    sanitize || GITHUB_SEARCH_SPECIAL.test(trimmed)
+      ? sanitizeGitHubSearchText(text)
+      : trimmed;
+  let q = searchPart + " is:issue";
   if (scopeType === "org" && scopeValue) {
     q += ` org:${scopeValue}`;
   } else if (scopeType === "repo" && scopeValue) {
@@ -408,18 +432,53 @@ async function doSearch(query) {
     showLoading();
   }
 
-  const fullQuery = buildQuery(searchText, settings.scopeType, settings.scopeValue);
+  const trimmedForQuery = searchText.trim();
+  const autoSanitized = GITHUB_SEARCH_SPECIAL.test(trimmedForQuery);
+  const queryAttempts = [
+    {
+      query: buildQuery(searchText, settings.scopeType, settings.scopeValue),
+      sanitized: autoSanitized,
+    },
+    {
+      query: buildQuery(searchText, settings.scopeType, settings.scopeValue, { sanitize: true }),
+      sanitized: true,
+    },
+  ].filter((attempt, i, arr) => arr.findIndex((a) => a.query === attempt.query) === i);
 
   try {
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQuery)}&search_type=${searchType}&per_page=30`;
+    let resp;
+    let body = {};
+    let usedSanitizedQuery = false;
 
-    const resp = await fetch(url, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${settings.githubToken}`,
-        "X-GitHub-Api-Version": "2022-11-28",
-      },
-    });
+    for (let i = 0; i < queryAttempts.length; i++) {
+      const { query: fullQuery, sanitized } = queryAttempts[i];
+      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQuery)}&search_type=${searchType}&per_page=30`;
+
+      resp = await fetch(url, {
+        headers: {
+          Accept: "application/vnd.github+json",
+          Authorization: `Bearer ${settings.githubToken}`,
+          "X-GitHub-Api-Version": "2022-11-28",
+        },
+      });
+
+      if (resp.ok) {
+        usedSanitizedQuery = sanitized;
+        break;
+      }
+
+      body = await resp.json().catch(() => ({}));
+      const isSyntaxError =
+        resp.status === 422 &&
+        (body.errors || []).some(
+          (err) =>
+            err.field === "q" &&
+            err.code === "invalid" &&
+            /invalid syntax/i.test(err.message || "")
+        );
+
+      if (!isSyntaxError || i === queryAttempts.length - 1) break;
+    }
 
     if (resp.status === 401) {
       showError(
@@ -448,10 +507,21 @@ async function doSearch(query) {
     }
 
     if (!resp.ok) {
-      const body = await resp.json().catch(() => ({}));
-      showError(`GitHub API error ${resp.status}: ${escapeHtml(body.message || "Unknown error")}`);
+      const detail = (body.errors || [])
+        .map((err) => err.message)
+        .filter(Boolean)
+        .join(" ");
+      const msg = detail || body.message || "Unknown error";
+      showError(`GitHub API error ${resp.status}: ${escapeHtml(msg)}`);
       searchBtn.disabled = false;
       return;
+    }
+
+    if (usedSanitizedQuery) {
+      showQueryAdjustedNotice(
+        "Special characters removed for GitHub search",
+        sanitizeGitHubSearchText(searchText)
+      );
     }
 
     const data = await resp.json();
