@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GitHub Semantic Search - Settings</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 48px 16px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 520px;
+    }
+
+    h1 {
+      font-size: 24px;
+      font-weight: 600;
+      margin-bottom: 8px;
+    }
+
+    .subtitle {
+      color: #8b949e;
+      font-size: 14px;
+      margin-bottom: 32px;
+    }
+
+    .form-group {
+      margin-bottom: 24px;
+    }
+
+    label {
+      display: block;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: #8b949e;
+      margin-bottom: 8px;
+    }
+
+    input[type="text"],
+    input[type="password"],
+    select {
+      width: 100%;
+      padding: 8px 12px;
+      font-size: 14px;
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      color: #e6edf3;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+
+    input:focus, select:focus {
+      border-color: #58a6ff;
+      box-shadow: 0 0 0 3px rgba(56, 139, 253, 0.15);
+    }
+
+    .scope-row {
+      display: flex;
+      gap: 12px;
+    }
+
+    .scope-row select { flex: 0 0 140px; }
+    .scope-row input { flex: 1; }
+
+    button {
+      background: #238636;
+      color: #fff;
+      border: none;
+      padding: 8px 20px;
+      font-size: 14px;
+      font-weight: 500;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    button:hover { background: #2ea043; }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(80px);
+      background: #238636;
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 14px;
+      opacity: 0;
+      transition: all 0.3s ease;
+      pointer-events: none;
+    }
+
+    .toast.visible {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>GitHub Semantic Search</h1>
+    <p class="subtitle">Configure your GitHub token and search scope.</p>
+
+    <div class="form-group">
+      <label for="token">GitHub Personal Access Token</label>
+      <p class="hint">
+        Create a token at
+        <a href="https://github.com/settings/tokens" target="_blank" style="color:#58a6ff">github.com/settings/tokens</a>.
+        No extra scopes required for public repos; enable <code style="color:#f0883e">repo</code> for private repos.
+      </p>
+      <input type="password" id="token" placeholder="ghp_xxxxxxxxxxxxxxxxxxxx" autocomplete="off">
+    </div>
+
+    <div class="form-group">
+      <label for="openai-key">OpenAI API Key</label>
+      <p class="hint">
+        Used to summarize long selections that exceed GitHub's 256-character query limit.
+        Get a key at
+        <a href="https://platform.openai.com/api-keys" target="_blank" style="color:#58a6ff">platform.openai.com/api-keys</a>.
+      </p>
+      <input type="password" id="openai-key" placeholder="sk-..." autocomplete="off">
+    </div>
+
+    <div class="form-group">
+      <label>Search Scope</label>
+      <p class="hint">Optionally limit results to a specific organization or repository.</p>
+      <div class="scope-row">
+        <select id="scope-type">
+          <option value="none">No scope</option>
+          <option value="org">Organization</option>
+          <option value="repo">Repository</option>
+        </select>
+        <input type="text" id="scope-value" placeholder="e.g. facebook/react" disabled>
+      </div>
+    </div>
+
+    <button id="save">Save Settings</button>
+  </div>
+
+  <div class="toast" id="toast">Settings saved</div>
+
+  <script src="options.js"></script>
+</body>
+</html>
