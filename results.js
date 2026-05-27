@@ -61,7 +61,8 @@ async function summarizeQuery(text, openaiKey) {
             content:
               "You are a search query optimizer. The user will give you a long piece of text. " +
               "Condense it into a concise GitHub issue search query that captures the core meaning. " +
-              "The query MUST be under 256 characters. Output ONLY the search query text, nothing else." +
+              "The query MUST be under 256 characters. Do NOT use double quotes in the output. " +
+              "Output ONLY the search query text, nothing else." +
               "Don't return the word Metabase or the version number in the query.",
           },
           { role: "user", content: text },
@@ -87,7 +88,9 @@ async function summarizeQuery(text, openaiKey) {
   }
 
   const data = await resp.json();
-  const summary = (data.choices?.[0]?.message?.content || "").trim();
+  const summary = (data.choices?.[0]?.message?.content || "")
+    .trim()
+    .replace(/"/g, "");
 
   if (!summary || summary.length > MAX_QUERY_LENGTH) {
     const truncated = text.slice(0, MAX_QUERY_LENGTH - 3).trimEnd() + "...";
@@ -135,85 +138,119 @@ function truncate(text, max) {
   return text.slice(0, max).trimEnd() + "...";
 }
 
-// --- TF-IDF relevance ranking ---
+// --- BM25 relevance ranking ---
+
+const STOP_WORDS = new Set([
+  "the", "be", "to", "of", "and", "in", "that", "have", "it", "for",
+  "not", "on", "with", "he", "as", "you", "do", "at", "this", "but",
+  "his", "by", "from", "they", "we", "say", "her", "she", "or", "an",
+  "will", "my", "one", "all", "would", "there", "their", "what", "so",
+  "up", "out", "if", "about", "who", "get", "which", "go", "me",
+  "when", "make", "can", "like", "no", "just", "him", "know", "take",
+  "into", "your", "some", "could", "them", "see", "other", "than",
+  "then", "now", "its", "also", "after", "use", "how", "our",
+  "was", "is", "are", "been", "has", "had", "did", "does",
+  "hello", "hi", "dear", "team", "support", "please", "thanks",
+  "thank", "regards", "best", "sincerely",
+]);
 
 function normalizeText(s) {
   return (s || "").toLowerCase().replace(/[^\w\s]/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function tokenize(s) {
-  return normalizeText(s).split(" ").filter((t) => t.length >= 2);
-}
-
-function termFrequency(tokens) {
-  const tf = {};
-  for (const t of tokens) {
-    tf[t] = (tf[t] || 0) + 1;
-  }
-  const len = tokens.length || 1;
-  for (const t in tf) tf[t] /= len;
-  return tf;
-}
-
-function buildTfidfVectors(docs) {
-  const n = docs.length;
-  const docFreq = {};
-  const tfs = docs.map((tokens) => {
-    const tf = termFrequency(tokens);
-    for (const t in tf) docFreq[t] = (docFreq[t] || 0) + 1;
-    return tf;
-  });
-  return tfs.map((tf) => {
-    const vec = {};
-    for (const t in tf) {
-      vec[t] = tf[t] * Math.log(n / docFreq[t]);
-    }
-    return vec;
-  });
-}
-
-function cosineSimilarity(vecA, vecB) {
-  let dot = 0, magA = 0, magB = 0;
-  for (const t in vecA) {
-    magA += vecA[t] * vecA[t];
-    if (t in vecB) dot += vecA[t] * vecB[t];
-  }
-  for (const t in vecB) magB += vecB[t] * vecB[t];
-  if (!magA || !magB) return 0;
-  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
+  return normalizeText(s).split(" ").filter((t) => t.length >= 2 && !STOP_WORDS.has(t));
 }
 
 const BODY_CAP = 4000;
+const TITLE_REPEATS = 4;
+const SUBJECT_BOOST = 10;
+const SEARCH_TEXT_REPEATS = 4;
 
 function issueDocument(issue) {
   const title = issue.title || "";
   const body = (issue.body || "").slice(0, BODY_CAP);
-  return title + "\n" + title + "\n" + body;
+  return Array(TITLE_REPEATS).fill(title).join("\n") + "\n" + body;
 }
 
-function rankIssuesByRelevance(issues, originalQuery) {
-  if (!issues.length) return [];
-  const queryTokens = tokenize(originalQuery);
-  if (!queryTokens.length) {
-    return issues.map((issue, i) => ({ issue, score: 0 }));
+function buildRankingQuery(originalQuery, searchText) {
+  if (originalQuery === searchText) return originalQuery;
+  return Array(SEARCH_TEXT_REPEATS).fill(searchText).join("\n") + "\n" + originalQuery;
+}
+
+function extractSubjectTokens(searchText) {
+  const match = searchText.match(/^([^:\u2014\u2013-]+)[:\u2014\u2013-]/);
+  if (!match) return [];
+  return tokenize(match[1]);
+}
+
+function bm25Score(queryTokens, docTokens, docFreq, numDocs, avgDl, subjectSet, k1 = 1.2, b = 0.75) {
+  const dl = docTokens.length;
+  const docTf = {};
+  for (const t of docTokens) docTf[t] = (docTf[t] || 0) + 1;
+
+  const queryTf = {};
+  for (const t of queryTokens) queryTf[t] = (queryTf[t] || 0) + 1;
+
+  let score = 0;
+  for (const term of Object.keys(queryTf)) {
+    const df = docFreq[term] || 0;
+    if (df === 0) continue;
+    const idf = Math.log((numDocs - df + 0.5) / (df + 0.5) + 1);
+    const termTf = docTf[term] || 0;
+    const tfNorm = (termTf * (k1 + 1)) / (termTf + k1 * (1 - b + b * (dl / avgDl)));
+    const boost = subjectSet.has(term) ? SUBJECT_BOOST : 1;
+    score += queryTf[term] * boost * idf * tfNorm;
   }
+  return score;
+}
+
+function rankIssuesByRelevance(issues, originalQuery, searchText) {
+  if (!issues.length) return [];
+
+  const blended = buildRankingQuery(originalQuery, searchText);
+  const queryTokens = tokenize(blended);
+  if (!queryTokens.length) {
+    return issues.map((issue) => ({ issue, score: 0 }));
+  }
+
+  const subjectSet = new Set(extractSubjectTokens(searchText));
   const docTokensList = issues.map((issue) => tokenize(issueDocument(issue)));
-  const allDocs = [queryTokens, ...docTokensList];
-  const vectors = buildTfidfVectors(allDocs);
-  const queryVec = vectors[0];
+
+  const docFreq = {};
+  for (const tokens of docTokensList) {
+    const unique = new Set(tokens);
+    for (const t of unique) docFreq[t] = (docFreq[t] || 0) + 1;
+  }
+
+  const numDocs = docTokensList.length;
+  const avgDl = docTokensList.reduce((sum, t) => sum + t.length, 0) / (numDocs || 1);
+
   const ranked = issues.map((issue, i) => ({
     issue,
-    score: cosineSimilarity(queryVec, vectors[i + 1]),
+    score: bm25Score(queryTokens, docTokensList[i], docFreq, numDocs, avgDl, subjectSet),
+    originalIndex: i,
   }));
-  ranked.sort((a, b) => b.score - a.score);
-  return ranked;
+
+  ranked.sort((a, b) => {
+    const diff = b.score - a.score;
+    const maxS = Math.max(a.score, b.score) || 1;
+    if (Math.abs(diff) / maxS < 0.05) return a.originalIndex - b.originalIndex;
+    return diff;
+  });
+
+  const maxScore = ranked[0]?.score || 1;
+  return ranked.map(({ issue, score }) => ({
+    issue,
+    score: maxScore > 0 ? score / maxScore : 0,
+  }));
 }
 
 function formatRelevance(score) {
   return `${Math.round(score * 100)}% match`;
 }
 
-// --- End TF-IDF relevance ranking ---
+// --- End BM25 relevance ranking ---
 
 function relativeTime(dateStr) {
   const diff = Date.now() - new Date(dateStr).getTime();
@@ -424,7 +461,7 @@ async function doSearch(query) {
     );
 
     const originalQuery = query.trim();
-    const ranked = rankIssuesByRelevance(issuesOnly, originalQuery);
+    const ranked = rankIssuesByRelevance(issuesOnly, originalQuery, searchText);
     renderResults(ranked);
   } catch (err) {
     showError(`Network error: ${escapeHtml(err.message)}`);
