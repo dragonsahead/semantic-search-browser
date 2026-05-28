@@ -54,6 +54,16 @@ The same AI-focused problem text is sent to both GitHub search and DeepWiki `ask
    - **Left:** semantically relevant GitHub issues (ranked locally)
    - **Right:** DeepWiki answer for your configured repo (if enabled)
 
+### Filters and focused query
+
+On the results page you can:
+
+- **Edit the GitHub search query** — after OpenAI focuses your selection, change the text in the focused query field and click **Search with this query** (or press Enter there) to re-run without calling OpenAI again.
+- **Issue state** — **All** (default), **Open**, or **Closed** adds the matching `is:open` / `is:closed` qualifier to the GitHub search.
+- **Feature requests only** — limits results to issues labeled `Type:New Feature`.
+
+Issue state and the feature-requests checkbox are remembered across sessions. Changing Hybrid/Semantic or any filter re-runs the search using the current focused query.
+
 ## Manual test checklist
 
 1. Options: set repo scope or DeepWiki repo to `metabase/metabase`, enable DeepWiki, save.
@@ -61,3 +71,7 @@ The same AI-focused problem text is sent to both GitHub search and DeepWiki `ask
 3. Left column shows issues; right column shows a spinner, then the full DeepWiki answer (same focused query in the notice).
 4. Disable DeepWiki → right column shows a settings hint only.
 5. In DevTools Network, confirm requests go to `mcp.deepwiki.com/mcp`, not `/sse`.
+6. Edit the focused GitHub query → **Search with this query** → Network shows updated `q` param; OpenAI is not called again.
+7. Set issue state to **Open** / **Closed** → results match state; reload tab → filter choice is restored.
+8. Enable **Feature requests only** → GitHub `q` includes `label:"Type:New Feature"`.
+9. Toggle Hybrid/Semantic after editing the focused query → search re-runs with your edited text (no new OpenAI call).

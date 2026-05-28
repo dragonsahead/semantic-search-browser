@@ -24,12 +24,35 @@
       <button id="search-btn">Search</button>
     </div>
 
-    <div class="search-type-toggle">
-      <button class="toggle-btn active" data-type="hybrid">Hybrid</button>
-      <button class="toggle-btn" data-type="semantic">Semantic</button>
+    <div id="search-type-toggle" class="search-type-toggle">
+      <button type="button" class="toggle-btn active" data-type="hybrid">Hybrid</button>
+      <button type="button" class="toggle-btn" data-type="semantic">Semantic</button>
     </div>
 
-    <div id="summarize-notice" class="summarize-notice"></div>
+    <div class="filter-bar">
+      <div class="issue-state-toggle search-type-toggle" role="group" aria-label="Issue state">
+        <button type="button" class="toggle-btn state-btn active" data-state="all">All</button>
+        <button type="button" class="toggle-btn state-btn" data-state="open">Open</button>
+        <button type="button" class="toggle-btn state-btn" data-state="closed">Closed</button>
+      </div>
+      <label class="feature-requests-label">
+        <input type="checkbox" id="feature-requests-only">
+        Feature requests only (Type:New Feature)
+      </label>
+    </div>
+
+    <div id="summarize-notice" class="summarize-notice">
+      <div id="focus-notice-status" class="focus-notice-status"></div>
+      <div class="focused-query-row">
+        <label for="focused-query-input" class="focused-query-label">GitHub search query</label>
+        <div class="focused-query-input-wrap">
+          <input type="text" id="focused-query-input" class="focused-query-input" maxlength="256" autocomplete="off" placeholder="Focused query sent to GitHub...">
+          <span id="focused-query-count" class="focused-query-count">0/256</span>
+        </div>
+        <button type="button" id="focused-search-btn" class="focused-search-btn">Search with this query</button>
+      </div>
+      <p id="focused-query-error" class="focused-query-error" hidden></p>
+    </div>
 
     <div class="results-split">
       <section id="github-column" class="results-column" aria-label="GitHub issues">
@@ -46,6 +69,11 @@
         <div id="deepwiki-status" class="status deepwiki-status"></div>
         <div id="deepwiki-stream" class="deepwiki-stream"></div>
         <div id="deepwiki-footer" class="deepwiki-footer"></div>
+        <div id="context7-section" class="context7-section">
+          <h3 class="context7-heading">Metabase docs</h3>
+          <div id="context7-status" class="context7-status"></div>
+          <ul id="context7-links" class="context7-links"></ul>
+        </div>
       </section>
     </div>
   </main>
