@@ -131,7 +131,7 @@
     <div class="form-group">
       <label for="openai-key">OpenAI API Key</label>
       <p class="hint">
-        Used to summarize long selections that exceed GitHub's 256-character query limit.
+        Used on every search to extract a short GitHub query from your selection. Your full text goes to OpenAI; the 256-character limit applies only to the summary sent to GitHub.
         Get a key at
         <a href="https://platform.openai.com/api-keys" target="_blank" style="color:#58a6ff">platform.openai.com/api-keys</a>.
       </p>
@@ -149,6 +149,19 @@
         </select>
         <input type="text" id="scope-value" placeholder="e.g. facebook/react" disabled>
       </div>
+    </div>
+
+    <div class="form-group">
+      <label>
+        <input type="checkbox" id="deepwiki-enabled" style="width:auto;margin-right:8px;">
+        Enable DeepWiki answers
+      </label>
+      <p class="hint">
+        Shows repo-grounded AI answers beside GitHub results via
+        <a href="https://docs.devin.ai/work-with-devin/deepwiki-mcp" target="_blank" style="color:#58a6ff">DeepWiki MCP</a>
+        (public repos, ~10–30s).
+      </p>
+      <input type="text" id="deepwiki-repo" placeholder="e.g. metabase/metabase">
     </div>
 
     <button id="save">Save Settings</button>

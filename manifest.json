@@ -4,7 +4,11 @@
   "version": "1.0.0",
   "description": "Search GitHub Issues using semantic search from any selected text",
   "permissions": ["contextMenus", "storage", "activeTab"],
-  "host_permissions": ["https://api.github.com/*", "https://api.openai.com/*"],
+  "host_permissions": [
+    "https://api.github.com/*",
+    "https://api.openai.com/*",
+    "https://mcp.deepwiki.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },

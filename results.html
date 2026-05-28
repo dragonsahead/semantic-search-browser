@@ -30,10 +30,27 @@
     </div>
 
     <div id="summarize-notice" class="summarize-notice"></div>
-    <div id="status" class="status"></div>
-    <div id="results"></div>
+
+    <div class="results-split">
+      <section id="github-column" class="results-column" aria-label="GitHub issues">
+        <h2 class="column-heading">GitHub Issues</h2>
+        <div id="status" class="status"></div>
+        <div id="results"></div>
+      </section>
+
+      <section id="deepwiki-column" class="results-column" aria-label="DeepWiki answer">
+        <div id="deepwiki-header" class="deepwiki-header">
+          <h2 class="column-heading">DeepWiki</h2>
+          <span id="deepwiki-repo-label" class="deepwiki-repo-label"></span>
+        </div>
+        <div id="deepwiki-status" class="status deepwiki-status"></div>
+        <div id="deepwiki-stream" class="deepwiki-stream"></div>
+        <div id="deepwiki-footer" class="deepwiki-footer"></div>
+      </section>
+    </div>
   </main>
 
+  <script src="deepwiki-mcp.js"></script>
   <script src="results.js"></script>
 </body>
 </html>

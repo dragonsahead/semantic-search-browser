@@ -2,7 +2,13 @@ const queryInput = document.getElementById("query-input");
 const searchBtn = document.getElementById("search-btn");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
+const deepwikiStatusEl = document.getElementById("deepwiki-status");
+const deepwikiStreamEl = document.getElementById("deepwiki-stream");
+const deepwikiFooterEl = document.getElementById("deepwiki-footer");
+const deepwikiRepoLabelEl = document.getElementById("deepwiki-repo-label");
 const settingsLink = document.getElementById("settings-link");
+
+let deepwikiAbortController = null;
 
 settingsLink.addEventListener("click", (e) => {
   e.preventDefault();
@@ -29,22 +35,53 @@ toggleBtns.forEach((btn) => {
 function getSettings() {
   return new Promise((resolve) => {
     chrome.storage.sync.get(
-      ["githubToken", "openaiKey", "scopeType", "scopeValue"],
-      resolve
+      [
+        "githubToken",
+        "openaiKey",
+        "scopeType",
+        "scopeValue",
+        "deepwikiEnabled",
+        "deepwikiRepo",
+      ],
+      (data) => {
+        const repoFromScope =
+          data.scopeType === "repo" && data.scopeValue ? data.scopeValue.trim() : "";
+        const deepwikiRepo =
+          (data.deepwikiRepo && data.deepwikiRepo.trim()) || repoFromScope;
+        const deepwikiEnabled =
+          typeof data.deepwikiEnabled === "boolean"
+            ? data.deepwikiEnabled
+            : Boolean(repoFromScope);
+        resolve({
+          ...data,
+          deepwikiRepo,
+          deepwikiEnabled,
+        });
+      }
     );
   });
 }
 
-async function summarizeQuery(text, openaiKey) {
-  if (text.length <= MAX_QUERY_LENGTH) {
-    return { text, wasSummarized: false };
-  }
+const EXTRACT_SYSTEM_PROMPT =
+  "You are a search query optimizer for GitHub issue search. " +
+  "The user will give you text (often chat, support tickets, or email). " +
+  "Extract ONLY the technical problem as a concise GitHub issue search query. " +
+  "REMOVE: @mentions, person names, emojis, reactions, timestamps, greetings, " +
+  "and attachment meta (e.g. 'sending you sample', 'see screenshot', 'attached'). " +
+  "KEEP: product area, symptoms, errors, expected vs actual behavior. " +
+  "Do NOT include: Metabase, version numbers, dashboard/question/model/table/column names. " +
+  "The query MUST be under 256 characters, so you need to include as much information as possible within this limit. Do NOT use double quotes. " +
+  "Output ONLY the search query text, nothing else.";
 
-  if (!openaiKey) {
-    const truncated = text.slice(0, MAX_QUERY_LENGTH - 3).trimEnd() + "...";
-    return { text: truncated, wasSummarized: true, method: "no_key" };
+function fallbackFocusedQuery(text) {
+  let focused = stripConversationalNoise(text);
+  if (focused.length > MAX_QUERY_LENGTH) {
+    focused = focused.slice(0, MAX_QUERY_LENGTH - 3).trimEnd() + "...";
   }
+  return focused;
+}
 
+async function extractProblemQuery(text, openaiKey) {
   let resp;
   try {
     resp = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -56,16 +93,7 @@ async function summarizeQuery(text, openaiKey) {
       body: JSON.stringify({
         model: "gpt-5.4-nano",
         messages: [
-          {
-            role: "system",
-            content:
-              "You are a search query optimizer. The user will give you a long piece of text. " +
-              "Condense it into a concise GitHub issue search query that captures the core meaning. " +
-              "The query MUST be under 256 characters. Do NOT use double quotes in the output. " +
-              "Output ONLY the search query text, nothing else." +
-              "Don't return the word Metabase or the version number in the query." + 
-              "Don't return dashboard, question, model, table or column names as they don't help with the search, just on the core problem",
-          },
+          { role: "system", content: EXTRACT_SYSTEM_PROMPT },
           { role: "user", content: text },
         ],
         max_completion_tokens: 150,
@@ -73,16 +101,19 @@ async function summarizeQuery(text, openaiKey) {
       }),
     });
   } catch (err) {
-    const truncated = text.slice(0, MAX_QUERY_LENGTH - 3).trimEnd() + "...";
-    return { text: truncated, wasSummarized: true, method: "network_error", error: err.message };
+    return {
+      text: fallbackFocusedQuery(text),
+      wasFocused: true,
+      method: "network_error",
+      error: err.message,
+    };
   }
 
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    const truncated = text.slice(0, MAX_QUERY_LENGTH - 3).trimEnd() + "...";
     return {
-      text: truncated,
-      wasSummarized: true,
+      text: fallbackFocusedQuery(text),
+      wasFocused: true,
       method: "api_error",
       error: `${resp.status}: ${body.error?.message || resp.statusText}`,
     };
@@ -94,26 +125,35 @@ async function summarizeQuery(text, openaiKey) {
     .replace(/"/g, "");
 
   if (!summary || summary.length > MAX_QUERY_LENGTH) {
-    const truncated = text.slice(0, MAX_QUERY_LENGTH - 3).trimEnd() + "...";
-    return { text: truncated, wasSummarized: true, method: "bad_summary" };
+    return { text: fallbackFocusedQuery(text), wasFocused: true, method: "bad_summary" };
   }
 
-  return { text: summary, wasSummarized: true, method: "llm" };
+  return { text: summary, wasFocused: true, method: "llm" };
 }
 
-function showSummarizeNotice(originalLength, finalQuery, method, error) {
+async function focusSearchQuery(text, openaiKey) {
+  if (openaiKey) {
+    return extractProblemQuery(text, openaiKey);
+  }
+  return { text: fallbackFocusedQuery(text), wasFocused: true, method: "no_key" };
+}
+
+function showFocusNotice(method, searchPart, error, originalLength) {
   const labels = {
-    llm: "Summarized by AI",
-    no_key: "Truncated — no OpenAI key configured",
-    api_error: `Truncated — OpenAI API error: ${error || "unknown"}`,
-    network_error: `Truncated — network error: ${error || "unknown"}`,
-    bad_summary: "Truncated — AI returned an invalid summary",
+    llm: "Focused on problem (AI)",
+    no_key: "Focused with basic cleanup — add OpenAI key for better results",
+    api_error: `Focused with basic cleanup — OpenAI API error: ${error || "unknown"}`,
+    network_error: `Focused with basic cleanup — network error: ${error || "unknown"}`,
+    bad_summary: "Focused with basic cleanup — AI returned an invalid summary",
   };
-  const methodLabel = labels[method] || "Truncated";
+  const methodLabel = labels[method] || "Focused with basic cleanup";
+  const lengthNote =
+    originalLength > MAX_QUERY_LENGTH
+      ? ` Original selection was ${originalLength} chars (limit: ${MAX_QUERY_LENGTH}).`
+      : "";
   noticeEl.innerHTML = `
-    <strong>${escapeHtml(methodLabel)}</strong> &mdash;
-    Original selection was ${originalLength} chars (limit: ${MAX_QUERY_LENGTH}).
-    Searching for: <em>${escapeHtml(finalQuery)}</em>
+    <strong>${escapeHtml(methodLabel)}</strong> &mdash;${lengthNote}
+    Searching for: <em>${escapeHtml(searchPart)}</em>
   `;
   noticeEl.classList.add("visible");
 }
@@ -141,12 +181,27 @@ function sanitizeGitHubSearchText(text) {
     .trim();
 }
 
-function buildQuery(text, scopeType, scopeValue, { sanitize = false } = {}) {
+function stripConversationalNoise(text) {
+  let s = text;
+  s = s.replace(/\p{Extended_Pictographic}/gu, " ");
+  s = s.replace(/@[\w][\w.-]*(?:\s+[\w][\w.-]*)*/g, " ");
+  s = s.replace(/\b\d{1,2}:\d{2}\s*(?:[AaPp][Mm])?\b/g, " ");
+  s = s.replace(/\bsending you\b[\s\S]*$/i, " ");
+  s = s.replace(/\bwith other screenshots\.?\s*$/i, " ");
+  s = s.replace(/\bsee attached\b[\s\S]*$/i, " ");
+  s = s.replace(/^(?:another issue with|hi|hello|hey)[,\s]*/i, " ");
+  return sanitizeGitHubSearchText(s);
+}
+
+function getSearchPart(text, { sanitize = false } = {}) {
   const trimmed = text.trim();
-  const searchPart =
-    sanitize || GITHUB_SEARCH_SPECIAL.test(trimmed)
-      ? sanitizeGitHubSearchText(text)
-      : trimmed;
+  return sanitize || GITHUB_SEARCH_SPECIAL.test(trimmed)
+    ? sanitizeGitHubSearchText(text)
+    : trimmed;
+}
+
+function buildQuery(text, scopeType, scopeValue, { sanitize = false } = {}) {
+  const searchPart = getSearchPart(text, { sanitize });
   let q = searchPart + " is:issue";
   if (scopeType === "org" && scopeValue) {
     q += ` org:${scopeValue}`;
@@ -235,7 +290,13 @@ function rankIssuesByRelevance(issues, originalQuery, searchText) {
   const blended = buildRankingQuery(originalQuery, searchText);
   const queryTokens = tokenize(blended);
   if (!queryTokens.length) {
-    return issues.map((issue) => ({ issue, score: 0 }));
+    return issues.map((issue, i) => ({
+      issue,
+      rank: i + 1,
+      total: issues.length,
+      queryTokens: [],
+      docTokens: [],
+    }));
   }
 
   const subjectSet = new Set(extractSubjectTokens(searchText));
@@ -258,20 +319,68 @@ function rankIssuesByRelevance(issues, originalQuery, searchText) {
 
   ranked.sort((a, b) => {
     const diff = b.score - a.score;
-    const maxS = Math.max(a.score, b.score) || 1;
-    if (Math.abs(diff) / maxS < 0.05) return a.originalIndex - b.originalIndex;
-    return diff;
+    if (diff !== 0) return diff;
+    return a.originalIndex - b.originalIndex;
   });
 
-  const maxScore = ranked[0]?.score || 1;
-  return ranked.map(({ issue, score }) => ({
+  const total = ranked.length;
+  return ranked.map(({ issue }, i) => ({
     issue,
-    score: maxScore > 0 ? score / maxScore : 0,
+    rank: i + 1,
+    total,
+    queryTokens,
+    docTokens: docTokensList[i],
   }));
 }
 
-function formatRelevance(score) {
-  return `${Math.round(score * 100)}% match`;
+function queryTermsInDoc(queryTokens, docTokens) {
+  const docSet = new Set(docTokens);
+  const matched = [];
+  const missing = [];
+  const seen = new Set();
+  for (const term of queryTokens) {
+    if (seen.has(term)) continue;
+    seen.add(term);
+    if (docSet.has(term)) matched.push(term);
+    else missing.push(term);
+  }
+  return { matched, missing };
+}
+
+const WEAK_MATCH_MIN_QUERY_TERMS = 3;
+const WEAK_MATCH_COVERAGE_THRESHOLD = 0.35;
+
+function buildWeakMatchNotice(rankedItems) {
+  if (!rankedItems.length) return null;
+  const top = rankedItems[0];
+  const { queryTokens, docTokens } = top;
+  if (!queryTokens?.length) return null;
+
+  const { matched, missing } = queryTermsInDoc(queryTokens, docTokens);
+  const uniqueCount = matched.length + missing.length;
+  if (!uniqueCount) return null;
+
+  const coverage = matched.length / uniqueCount;
+  if (
+    missing.length === 0 ||
+    uniqueCount < WEAK_MATCH_MIN_QUERY_TERMS ||
+    coverage >= WEAK_MATCH_COVERAGE_THRESHOLD
+  ) {
+    return null;
+  }
+
+  const shown = missing.slice(0, 8);
+  const extra = missing.length > shown.length ? ` (+${missing.length - shown.length} more)` : "";
+  return (
+    "Top result may be a weak match — few keywords from your query appear in that issue. " +
+    `Not found in #1: ${shown.join(", ")}${extra}. ` +
+    "Scores are relative to GitHub’s result set, not a guarantee of relevance."
+  );
+}
+
+function formatRelevance(rank, total) {
+  if (total <= 1) return "#1";
+  return `#${rank} of ${total}`;
 }
 
 // --- End BM25 relevance ranking ---
@@ -325,12 +434,20 @@ function renderResults(rankedItems) {
   statusEl.innerHTML = "";
   resultsEl.innerHTML = "";
 
+  const weakNotice = buildWeakMatchNotice(rankedItems);
+  if (weakNotice) {
+    const weakEl = document.createElement("div");
+    weakEl.className = "weak-match-notice";
+    weakEl.textContent = weakNotice;
+    resultsEl.appendChild(weakEl);
+  }
+
   const countEl = document.createElement("div");
   countEl.className = "result-count";
-  countEl.textContent = `${rankedItems.length} issue${rankedItems.length !== 1 ? "s" : ""} found \u00b7 sorted by relevance`;
+  countEl.textContent = `${rankedItems.length} issue${rankedItems.length !== 1 ? "s" : ""} found \u00b7 ranked locally among GitHub results`;
   resultsEl.appendChild(countEl);
 
-  for (const { issue, score } of rankedItems) {
+  for (const { issue, rank, total } of rankedItems) {
     const repo = repoFromUrl(issue.html_url);
     const card = document.createElement("div");
     card.className = "card";
@@ -362,7 +479,7 @@ function renderResults(rankedItems) {
       ${issue.body ? `<div class="card-body">${escapeHtml(truncate(issue.body, 300))}</div>` : ""}
       <div class="card-footer">
         ${labelsHtml}
-        <span class="relevance-score">${formatRelevance(score)}</span>
+        <span class="relevance-score" title="Position after local re-ranking of GitHub results">${formatRelevance(rank, total)}</span>
         <span class="card-meta">updated ${relativeTime(issue.updated_at)}</span>
       </div>
     `;
@@ -392,6 +509,191 @@ function showLoading() {
   statusEl.innerHTML = `<div class="spinner"></div>Searching...`;
 }
 
+function showDeepWikiLoading() {
+  deepwikiStreamEl.textContent = "";
+  deepwikiStreamEl.classList.add("deepwiki-streaming");
+  deepwikiFooterEl.innerHTML = "";
+  deepwikiStatusEl.className = "status deepwiki-status";
+  deepwikiStatusEl.innerHTML = `<div class="spinner"></div>Asking DeepWiki...`;
+}
+
+function showDeepWikiHint(messageHtml) {
+  deepwikiStreamEl.classList.remove("deepwiki-streaming");
+  deepwikiStreamEl.innerHTML = "";
+  deepwikiStatusEl.innerHTML = "";
+  deepwikiFooterEl.innerHTML = "";
+  deepwikiStatusEl.innerHTML = `<div class="deepwiki-hint">${messageHtml}</div>`;
+}
+
+function showDeepWikiError(msg) {
+  deepwikiStreamEl.classList.remove("deepwiki-streaming");
+  deepwikiStreamEl.innerHTML = "";
+  deepwikiStatusEl.className = "status deepwiki-status error";
+  deepwikiStatusEl.textContent = msg;
+  deepwikiFooterEl.innerHTML = "";
+}
+
+function appendDeepWikiChunk(delta) {
+  deepwikiStatusEl.innerHTML = "";
+  deepwikiStreamEl.append(document.createTextNode(delta));
+}
+
+function finishDeepWiki(repo, fullText) {
+  deepwikiStreamEl.classList.remove("deepwiki-streaming");
+  deepwikiStatusEl.innerHTML = "";
+  if (fullText) {
+    deepwikiStreamEl.textContent = fullText;
+  }
+  deepwikiFooterEl.innerHTML = `
+    <a href="https://deepwiki.com/${escapeAttr(repo)}" target="_blank" rel="noopener">
+      Open on DeepWiki
+    </a>
+  `;
+}
+
+function resetDeepWikiColumn(repo) {
+  if (deepwikiAbortController) {
+    deepwikiAbortController.abort();
+    deepwikiAbortController = null;
+  }
+  deepwikiRepoLabelEl.textContent = repo ? repo : "";
+  deepwikiStreamEl.classList.remove("deepwiki-streaming");
+  deepwikiStreamEl.textContent = "";
+  deepwikiFooterEl.innerHTML = "";
+  deepwikiStatusEl.className = "status deepwiki-status";
+  deepwikiStatusEl.innerHTML = "";
+}
+
+async function runDeepWikiSearch(searchText, settings) {
+  const repo = settings.deepwikiRepo;
+  if (!settings.deepwikiEnabled || !repo) {
+    showDeepWikiHint(
+      'DeepWiki is off or no repository is set. <a href="#" id="deepwiki-open-options">Configure in settings</a> (use <code style="color:#f0883e">owner/repo</code>).'
+    );
+    document.getElementById("deepwiki-open-options")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.runtime.openOptionsPage();
+    });
+    return;
+  }
+
+  resetDeepWikiColumn(repo);
+  showDeepWikiLoading();
+
+  deepwikiAbortController = new AbortController();
+  const signal = deepwikiAbortController.signal;
+
+  try {
+    await askDeepWikiStream(repo, searchText, {
+      signal,
+      onChunk: (delta) => appendDeepWikiChunk(delta),
+      onDone: (fullText) => finishDeepWiki(repo, fullText),
+    });
+  } catch (err) {
+    if (err.name !== "AbortError") {
+      showDeepWikiError(err.message || "DeepWiki unavailable");
+    }
+  } finally {
+    deepwikiAbortController = null;
+  }
+}
+
+async function searchGitHubIssues(query, searchText, settings, focusMeta) {
+  const { focusMethod, focusError, originalLength } = focusMeta;
+
+  const trimmedForQuery = searchText.trim();
+  const autoSanitized = GITHUB_SEARCH_SPECIAL.test(trimmedForQuery);
+  const queryAttempts = [
+    {
+      query: buildQuery(searchText, settings.scopeType, settings.scopeValue),
+      sanitized: autoSanitized,
+    },
+    {
+      query: buildQuery(searchText, settings.scopeType, settings.scopeValue, { sanitize: true }),
+      sanitized: true,
+    },
+  ].filter((attempt, i, arr) => arr.findIndex((a) => a.query === attempt.query) === i);
+
+  let resp;
+  let body = {};
+  let usedSanitizedQuery = false;
+
+  for (let i = 0; i < queryAttempts.length; i++) {
+    const { query: fullQuery, sanitized } = queryAttempts[i];
+    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQuery)}&search_type=${searchType}&per_page=30`;
+
+    resp = await fetch(url, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${settings.githubToken}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
+    });
+
+    if (resp.ok) {
+      usedSanitizedQuery = sanitized;
+      break;
+    }
+
+    body = await resp.json().catch(() => ({}));
+    const isSyntaxError =
+      resp.status === 422 &&
+      (body.errors || []).some(
+        (err) =>
+          err.field === "q" &&
+          err.code === "invalid" &&
+          /invalid syntax/i.test(err.message || "")
+      );
+
+    if (!isSyntaxError || i === queryAttempts.length - 1) break;
+  }
+
+  if (resp.status === 401) {
+    showError(
+      'Invalid GitHub token. <a href="#" id="open-options">Update settings</a>.'
+    );
+    document.getElementById("open-options")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.runtime.openOptionsPage();
+    });
+    return;
+  }
+
+  if (resp.status === 403) {
+    const resetHeader = resp.headers.get("x-ratelimit-reset");
+    let extra = "";
+    if (resetHeader) {
+      const resetDate = new Date(parseInt(resetHeader, 10) * 1000);
+      extra = ` Resets at ${resetDate.toLocaleTimeString()}.`;
+    }
+    showError(`Rate limit exceeded.${extra} Semantic search is limited to 10 requests/minute.`);
+    return;
+  }
+
+  if (!resp.ok) {
+    const detail = (body.errors || [])
+      .map((err) => err.message)
+      .filter(Boolean)
+      .join(" ");
+    const msg = detail || body.message || "Unknown error";
+    showError(`GitHub API error ${resp.status}: ${escapeHtml(msg)}`);
+    return;
+  }
+
+  const sentSearchPart = getSearchPart(searchText);
+  if (focusMethod) {
+    showFocusNotice(focusMethod, sentSearchPart, focusError, originalLength);
+  } else if (usedSanitizedQuery) {
+    showQueryAdjustedNotice("GitHub syntax adjusted", sentSearchPart);
+  }
+
+  const data = await resp.json();
+  const issuesOnly = (data.items || []).filter((item) => !item.pull_request);
+  const originalQuery = query.trim();
+  const ranked = rankIssuesByRelevance(issuesOnly, originalQuery, searchText);
+  renderResults(ranked);
+}
+
 async function doSearch(query) {
   if (!query.trim()) return;
 
@@ -416,123 +718,34 @@ async function doSearch(query) {
 
   let searchText = query.trim();
   const originalLength = searchText.length;
+  let focusMethod = null;
+  let focusError = null;
 
-  if (searchText.length > MAX_QUERY_LENGTH) {
-    statusEl.innerHTML = `<div class="spinner"></div>Summarizing long selection...`;
-    try {
-      const result = await summarizeQuery(searchText, settings.openaiKey);
-      searchText = result.text;
-      if (result.wasSummarized) {
-        showSummarizeNotice(originalLength, searchText, result.method, result.error);
-      }
-    } catch (err) {
-      searchText = searchText.slice(0, MAX_QUERY_LENGTH - 3).trimEnd() + "...";
-      showSummarizeNotice(originalLength, searchText, "truncated");
-    }
-    showLoading();
+  statusEl.innerHTML = `<div class="spinner"></div>Extracting problem from selection...`;
+  try {
+    const focusResult = await focusSearchQuery(searchText, settings.openaiKey);
+    searchText = focusResult.text;
+    focusMethod = focusResult.method;
+    focusError = focusResult.error;
+  } catch (err) {
+    searchText = fallbackFocusedQuery(searchText);
+    focusMethod = "network_error";
+    focusError = err.message;
   }
+  showLoading();
+  resetDeepWikiColumn(settings.deepwikiRepo || "");
 
-  const trimmedForQuery = searchText.trim();
-  const autoSanitized = GITHUB_SEARCH_SPECIAL.test(trimmedForQuery);
-  const queryAttempts = [
-    {
-      query: buildQuery(searchText, settings.scopeType, settings.scopeValue),
-      sanitized: autoSanitized,
-    },
-    {
-      query: buildQuery(searchText, settings.scopeType, settings.scopeValue, { sanitize: true }),
-      sanitized: true,
-    },
-  ].filter((attempt, i, arr) => arr.findIndex((a) => a.query === attempt.query) === i);
+  const focusMeta = {
+    focusMethod,
+    focusError,
+    originalLength,
+  };
 
   try {
-    let resp;
-    let body = {};
-    let usedSanitizedQuery = false;
-
-    for (let i = 0; i < queryAttempts.length; i++) {
-      const { query: fullQuery, sanitized } = queryAttempts[i];
-      const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQuery)}&search_type=${searchType}&per_page=30`;
-
-      resp = await fetch(url, {
-        headers: {
-          Accept: "application/vnd.github+json",
-          Authorization: `Bearer ${settings.githubToken}`,
-          "X-GitHub-Api-Version": "2022-11-28",
-        },
-      });
-
-      if (resp.ok) {
-        usedSanitizedQuery = sanitized;
-        break;
-      }
-
-      body = await resp.json().catch(() => ({}));
-      const isSyntaxError =
-        resp.status === 422 &&
-        (body.errors || []).some(
-          (err) =>
-            err.field === "q" &&
-            err.code === "invalid" &&
-            /invalid syntax/i.test(err.message || "")
-        );
-
-      if (!isSyntaxError || i === queryAttempts.length - 1) break;
-    }
-
-    if (resp.status === 401) {
-      showError(
-        'Invalid GitHub token. <a href="#" id="open-options">Update settings</a>.'
-      );
-      document
-        .getElementById("open-options")
-        ?.addEventListener("click", (e) => {
-          e.preventDefault();
-          chrome.runtime.openOptionsPage();
-        });
-      searchBtn.disabled = false;
-      return;
-    }
-
-    if (resp.status === 403) {
-      const resetHeader = resp.headers.get("x-ratelimit-reset");
-      let extra = "";
-      if (resetHeader) {
-        const resetDate = new Date(parseInt(resetHeader, 10) * 1000);
-        extra = ` Resets at ${resetDate.toLocaleTimeString()}.`;
-      }
-      showError(`Rate limit exceeded.${extra} Semantic search is limited to 10 requests/minute.`);
-      searchBtn.disabled = false;
-      return;
-    }
-
-    if (!resp.ok) {
-      const detail = (body.errors || [])
-        .map((err) => err.message)
-        .filter(Boolean)
-        .join(" ");
-      const msg = detail || body.message || "Unknown error";
-      showError(`GitHub API error ${resp.status}: ${escapeHtml(msg)}`);
-      searchBtn.disabled = false;
-      return;
-    }
-
-    if (usedSanitizedQuery) {
-      showQueryAdjustedNotice(
-        "Special characters removed for GitHub search",
-        sanitizeGitHubSearchText(searchText)
-      );
-    }
-
-    const data = await resp.json();
-
-    const issuesOnly = (data.items || []).filter(
-      (item) => !item.pull_request
-    );
-
-    const originalQuery = query.trim();
-    const ranked = rankIssuesByRelevance(issuesOnly, originalQuery, searchText);
-    renderResults(ranked);
+    await Promise.allSettled([
+      searchGitHubIssues(query, searchText, settings, focusMeta),
+      runDeepWikiSearch(searchText, settings),
+    ]);
   } catch (err) {
     showError(`Network error: ${escapeHtml(err.message)}`);
   } finally {
