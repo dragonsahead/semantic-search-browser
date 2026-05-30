@@ -20,25 +20,13 @@
 
   <main>
     <div class="search-bar">
-      <input type="text" id="query-input" placeholder="Search GitHub issues..." autocomplete="off">
+      <input type="text" id="query-input" placeholder="Search GitHub issues and pull requests..." autocomplete="off">
       <button id="search-btn">Search</button>
     </div>
 
     <div id="search-type-toggle" class="search-type-toggle">
       <button type="button" class="toggle-btn active" data-type="hybrid">Hybrid</button>
       <button type="button" class="toggle-btn" data-type="semantic">Semantic</button>
-    </div>
-
-    <div class="filter-bar">
-      <div class="issue-state-toggle search-type-toggle" role="group" aria-label="Issue state">
-        <button type="button" class="toggle-btn state-btn active" data-state="all">All</button>
-        <button type="button" class="toggle-btn state-btn" data-state="open">Open</button>
-        <button type="button" class="toggle-btn state-btn" data-state="closed">Closed</button>
-      </div>
-      <label class="feature-requests-label">
-        <input type="checkbox" id="feature-requests-only">
-        Feature requests only (Type:New Feature)
-      </label>
     </div>
 
     <div id="summarize-notice" class="summarize-notice">
@@ -56,23 +44,72 @@
 
     <div class="results-split">
       <section id="github-column" class="results-column" aria-label="GitHub issues">
-        <h2 class="column-heading">GitHub Issues</h2>
+        <div class="column-toolbar">
+          <div class="column-header">
+            <h2 class="column-heading">GitHub Issues</h2>
+            <div class="column-header-controls">
+              <div class="issue-state-toggle search-type-toggle" role="group" aria-label="Issue state">
+                <button type="button" class="toggle-btn issue-state-btn active" data-state="all">All</button>
+                <button type="button" class="toggle-btn issue-state-btn" data-state="open">Open</button>
+                <button type="button" class="toggle-btn issue-state-btn" data-state="closed">Closed</button>
+              </div>
+              <label class="feature-requests-label">
+                <input type="checkbox" id="feature-requests-only">
+                Feature requests only (Type:New Feature)
+              </label>
+            </div>
+          </div>
+        </div>
         <div id="status" class="status"></div>
-        <div id="results"></div>
+        <div class="column-body">
+          <div id="issues-meta" class="column-meta"></div>
+          <div id="results"></div>
+        </div>
+      </section>
+
+      <section id="pr-column" class="results-column" aria-label="GitHub pull requests">
+        <div class="column-toolbar">
+          <div class="column-header">
+            <h2 class="column-heading">GitHub Pull Requests</h2>
+            <div class="issue-state-toggle search-type-toggle" role="group" aria-label="Pull request state">
+              <button type="button" class="toggle-btn pr-state-btn active" data-state="all">All</button>
+              <button type="button" class="toggle-btn pr-state-btn" data-state="open">Open</button>
+              <button type="button" class="toggle-btn pr-state-btn" data-state="closed">Closed</button>
+            </div>
+          </div>
+          <div class="pr-keyword-row">
+            <label for="pr-keyword-input" class="pr-keyword-label">PR search keyword</label>
+            <div class="pr-keyword-input-wrap">
+              <input type="text" id="pr-keyword-input" class="pr-keyword-input" maxlength="32" autocomplete="off" placeholder="Keyword sent to GitHub PR search...">
+              <span id="pr-keyword-count" class="pr-keyword-count">0/32</span>
+            </div>
+            <button type="button" id="pr-keyword-search-btn" class="pr-keyword-search-btn">Search pull requests</button>
+            <p id="pr-keyword-error" class="pr-keyword-error" hidden></p>
+          </div>
+        </div>
+        <div id="pr-status" class="status"></div>
+        <div class="column-body">
+          <div id="pr-meta" class="column-meta"></div>
+          <div id="pr-results"></div>
+        </div>
       </section>
 
       <section id="deepwiki-column" class="results-column" aria-label="DeepWiki answer">
-        <div id="deepwiki-header" class="deepwiki-header">
-          <h2 class="column-heading">DeepWiki</h2>
-          <span id="deepwiki-repo-label" class="deepwiki-repo-label"></span>
+        <div class="column-toolbar">
+          <div class="column-header">
+            <h2 class="column-heading">DeepWiki</h2>
+            <span id="deepwiki-repo-label" class="deepwiki-repo-label"></span>
+          </div>
         </div>
         <div id="deepwiki-status" class="status deepwiki-status"></div>
-        <div id="deepwiki-stream" class="deepwiki-stream"></div>
-        <div id="deepwiki-footer" class="deepwiki-footer"></div>
-        <div id="context7-section" class="context7-section">
-          <h3 class="context7-heading">Metabase docs</h3>
-          <div id="context7-status" class="context7-status"></div>
-          <ul id="context7-links" class="context7-links"></ul>
+        <div class="column-body">
+          <div id="deepwiki-stream" class="deepwiki-stream"></div>
+          <div id="deepwiki-footer" class="deepwiki-footer"></div>
+          <div id="context7-section" class="context7-section">
+            <h3 class="context7-heading">Metabase docs</h3>
+            <div id="context7-status" class="context7-status"></div>
+            <ul id="context7-links" class="context7-links"></ul>
+          </div>
         </div>
       </section>
     </div>

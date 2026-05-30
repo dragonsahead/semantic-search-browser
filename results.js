@@ -1,7 +1,11 @@
 const queryInput = document.getElementById("query-input");
 const searchBtn = document.getElementById("search-btn");
 const statusEl = document.getElementById("status");
+const issuesMetaEl = document.getElementById("issues-meta");
 const resultsEl = document.getElementById("results");
+const prStatusEl = document.getElementById("pr-status");
+const prMetaEl = document.getElementById("pr-meta");
+const prResultsEl = document.getElementById("pr-results");
 const deepwikiStatusEl = document.getElementById("deepwiki-status");
 const deepwikiStreamEl = document.getElementById("deepwiki-stream");
 const deepwikiFooterEl = document.getElementById("deepwiki-footer");
@@ -18,7 +22,12 @@ const focusedSearchBtn = document.getElementById("focused-search-btn");
 const focusedQueryErrorEl = document.getElementById("focused-query-error");
 const searchTypeToggle = document.getElementById("search-type-toggle");
 const searchTypeBtns = searchTypeToggle.querySelectorAll(".toggle-btn[data-type]");
-const stateBtns = document.querySelectorAll(".state-btn");
+const issueStateBtns = document.querySelectorAll("#github-column .issue-state-btn");
+const prStateBtns = document.querySelectorAll("#pr-column .pr-state-btn");
+const prKeywordInput = document.getElementById("pr-keyword-input");
+const prKeywordCountEl = document.getElementById("pr-keyword-count");
+const prKeywordSearchBtn = document.getElementById("pr-keyword-search-btn");
+const prKeywordErrorEl = document.getElementById("pr-keyword-error");
 const featureRequestsCheckbox = document.getElementById("feature-requests-only");
 
 let deepwikiAbortController = null;
@@ -28,9 +37,11 @@ const CONTEXT7_DOCS_URL =
   "https://context7.com/api/web/docs/info/websites/metabase?tokens=100000&type=json";
 
 const MAX_QUERY_LENGTH = 256;
+const MAX_CODE_KEYWORD_LENGTH = 32;
 let searchType = "hybrid";
 let lastSourceQuery = "";
 let lastFocusedText = "";
+let lastCodeKeyword = "";
 
 settingsLink.addEventListener("click", (e) => {
   e.preventDefault();
@@ -78,63 +89,244 @@ function getSettings() {
   });
 }
 
+function parseStateFilter(value) {
+  return value === "open" || value === "closed" ? value : "all";
+}
+
 function loadFilterPrefs() {
   return new Promise((resolve) => {
-    chrome.storage.sync.get(["issueStateFilter", "featureRequestsOnly"], (data) => {
-      const issueState =
-        data.issueStateFilter === "open" || data.issueStateFilter === "closed"
-          ? data.issueStateFilter
-          : "all";
-      const featureRequestsOnly = Boolean(data.featureRequestsOnly);
-      resolve({ issueState, featureRequestsOnly });
-    });
+    chrome.storage.sync.get(
+      ["issueStateFilter", "prStateFilter", "featureRequestsOnly"],
+      (data) => {
+        resolve({
+          issueState: parseStateFilter(data.issueStateFilter),
+          prState: parseStateFilter(data.prStateFilter),
+          featureRequestsOnly: Boolean(data.featureRequestsOnly),
+        });
+      }
+    );
   });
 }
 
-function saveFilterPrefs() {
-  const filters = getSearchFilters();
+function saveIssueFilterPrefs() {
+  const filters = getIssueSearchFilters();
   chrome.storage.sync.set({
     issueStateFilter: filters.issueState,
     featureRequestsOnly: filters.featureRequestsOnly,
   });
 }
 
-function applyFilterPrefs({ issueState, featureRequestsOnly }) {
-  stateBtns.forEach((btn) => {
+function savePrFilterPrefs() {
+  const filters = getPrSearchFilters();
+  chrome.storage.sync.set({ prStateFilter: filters.prState });
+}
+
+function applyFilterPrefs({ issueState, prState, featureRequestsOnly }) {
+  issueStateBtns.forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.state === issueState);
+  });
+  prStateBtns.forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.state === prState);
   });
   featureRequestsCheckbox.checked = featureRequestsOnly;
 }
 
-function getSearchFilters() {
-  const activeStateBtn = document.querySelector(".state-btn.active");
-  const issueState = activeStateBtn?.dataset.state || "all";
+function getIssueSearchFilters() {
+  const activeStateBtn = document.querySelector("#github-column .issue-state-btn.active");
   return {
-    issueState,
+    issueState: activeStateBtn?.dataset.state || "all",
     featureRequestsOnly: featureRequestsCheckbox.checked,
   };
 }
 
-const EXTRACT_SYSTEM_PROMPT =
-  "You are a search query optimizer for GitHub issue search. " +
-  "The user will give you text (often chat, support tickets, or email). " +
-  "Extract ONLY the technical problem as a concise GitHub issue search query. " +
-  "REMOVE: @mentions, person names, emojis, reactions, timestamps, greetings, " +
-  "and attachment meta (e.g. 'sending you sample', 'see screenshot', 'attached'). " +
-  "KEEP: product area, symptoms, errors, expected vs actual behavior. " +
-  "Do NOT include: Metabase, version numbers, dashboard/question/model/table/column names. " +
-  "The query MUST be under 256 characters, so you need to include as much information as possible within this limit. Do NOT use double quotes. " +
-  "Output ONLY the search query text, nothing else.";
-
-function fallbackFocusedQuery(text) {
-  let focused = stripConversationalNoise(text);
-  if (focused.length > MAX_QUERY_LENGTH) {
-    focused = focused.slice(0, MAX_QUERY_LENGTH - 3).trimEnd() + "...";
-  }
-  return focused;
+function getPrSearchFilters() {
+  const activeStateBtn = document.querySelector("#pr-column .pr-state-btn.active");
+  return {
+    prState: activeStateBtn?.dataset.state || "all",
+  };
 }
 
-async function extractProblemQuery(text, openaiKey) {
+function getSearchFilters() {
+  return getIssueSearchFilters();
+}
+
+const EXTRACT_SYSTEM_PROMPT =
+  "You are a search query optimizer for GitHub. " +
+  "The user will give you text (often chat, support tickets, or email). " +
+  "Respond with JSON only, no markdown, using exactly these keys:\n" +
+  "githubSearchQuery: concise GitHub issue hybrid search query for the technical problem. " +
+  "REMOVE @mentions, person names, emojis, reactions, timestamps, greetings, attachment meta. " +
+  "KEEP product area, symptoms, errors, expected vs actual behavior. " +
+  "Do NOT include Metabase, version numbers, or dashboard/question/model/table/column names. " +
+  "Stay under 256 characters. No double quotes in the value.\n" +
+  "codeKeyword: separate from githubSearchQuery — ONE plain token for GitHub pull request title/body search only. " +
+  "NOT GitHub issue search syntax: no +, no :, no quotes, no is/open/closed/org/repo qualifiers, no boolean operators. " +
+  "Letters, digits, underscore only; lowercase; must appear in the user message (exact snake_case substring allowed, e.g. known_hosts). " +
+  "Pick a distinctive technical term from the message (protocol, feature, error class) that engineers use in PR titles. " +
+  "Examples: SSH tunnel timeout ticket → known_hosts or ssh (not timeout+is, not connection). " +
+  "Pivot Excel export → export or pivot (not pivot_export). Bad: timeout+is, is, open, invented compounds.";
+
+const CODE_KEYWORD_USER_SUFFIX =
+  "\n\n---\nFor codeKeyword only: pick ONE word from the message above (not GitHub search syntax). " +
+  "Valid examples: known_hosts, ssh, export. Invalid: timeout+is, is, open, any string with + or :.";
+
+const GITHUB_SEARCH_QUALIFIERS = new Set([
+  "is",
+  "open",
+  "closed",
+  "pr",
+  "issue",
+  "org",
+  "repo",
+  "user",
+  "label",
+  "state",
+]);
+
+function fallbackFocusedQuery(text, maxLen = MAX_QUERY_LENGTH) {
+  let focused = stripConversationalNoise(text);
+  return truncateSearchPart(focused, maxLen);
+}
+
+function normalizeCodeKeyword(keyword) {
+  let k = String(keyword || "")
+    .trim()
+    .replace(/"/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, "_");
+  if (k.length > MAX_CODE_KEYWORD_LENGTH) {
+    k = k.slice(0, MAX_CODE_KEYWORD_LENGTH);
+  }
+  return k;
+}
+
+function isValidCodeKeywordShape(keyword) {
+  const k = normalizeCodeKeyword(keyword);
+  if (!k || !/^[a-z0-9_]+$/.test(k)) return false;
+  if (/[+:]/.test(k)) return false;
+  if (GITHUB_SEARCH_QUALIFIERS.has(k)) return false;
+  return true;
+}
+
+function isCodeKeywordGrounded(keyword, sourceText) {
+  const k = normalizeCodeKeyword(keyword);
+  if (!k) return false;
+  const source = String(sourceText || "");
+  if (k.includes("_")) {
+    return source.toLowerCase().includes(k);
+  }
+  return tokenize(source).includes(k);
+}
+
+function reconcileCodeKeyword(llmKeyword, sourceText, githubSearchQuery) {
+  const normalized = normalizeCodeKeyword(llmKeyword);
+  if (
+    normalized &&
+    isValidCodeKeywordShape(normalized) &&
+    isCodeKeywordGrounded(normalized, sourceText)
+  ) {
+    return normalized;
+  }
+  return deriveCodeKeyword(githubSearchQuery || sourceText);
+}
+
+function resolvePrKeywordForSearch(rawKeyword, sourceText, issueSearchText) {
+  const normalized = normalizeCodeKeyword(rawKeyword);
+  if (normalized && isValidCodeKeywordShape(normalized)) {
+    return normalized;
+  }
+  return reconcileCodeKeyword("", sourceText, issueSearchText);
+}
+
+function sanitizeManualPrKeyword(raw) {
+  const normalized = normalizeCodeKeyword(raw);
+  if (!normalized) {
+    return { keyword: "", error: "Enter a PR search keyword." };
+  }
+  if (!isValidCodeKeywordShape(normalized)) {
+    return {
+      keyword: "",
+      error: "Use one word only — no +, :, or GitHub qualifiers (is, open, …).",
+    };
+  }
+  return { keyword: normalized, error: "" };
+}
+
+function formatPrSearchText(keyword, sourceText) {
+  const k = String(keyword || "").trim().toLowerCase();
+  if (!k) return "";
+  const source = String(sourceText || "").toLowerCase();
+  if (source.includes(k)) return k;
+  if (k.includes("_")) {
+    return k.split("_").filter(Boolean).join(" ");
+  }
+  if (k.includes("+")) {
+    return k.split("+").filter(Boolean).join(" ");
+  }
+  return k;
+}
+
+function deriveCodeKeyword(text) {
+  const tokens = tokenize(text);
+  const candidates = tokens.filter((t) => t.length >= 4 && isValidCodeKeywordShape(t));
+  if (candidates.length) {
+    candidates.sort((a, b) => b.length - a.length);
+    return normalizeCodeKeyword(candidates[0]);
+  }
+  const fallback = normalizeText(text)
+    .split(" ")
+    .filter((t) => t.length >= 3 && !STOP_WORDS.has(t) && isValidCodeKeywordShape(t));
+  if (fallback.length) {
+    fallback.sort((a, b) => b.length - a.length);
+    return normalizeCodeKeyword(fallback[0]);
+  }
+  const first = normalizeText(text)
+    .split(" ")
+    .find((t) => t.length >= 2 && isValidCodeKeywordShape(t));
+  return normalizeCodeKeyword(first || "bug");
+}
+
+function derivePrPhraseFromQuery(githubSearchQuery, settings, filters) {
+  const tokens = tokenize(githubSearchQuery).filter((t) => t.length >= 3);
+  if (!tokens.length) return "";
+  tokens.sort((a, b) => b.length - a.length);
+  const phrase = tokens.slice(0, 3).join(" ");
+  const maxLen = maxSearchPartLength(
+    settings.scopeType,
+    settings.scopeValue,
+    filters,
+    "pr"
+  );
+  return truncateSearchPart(phrase, maxLen);
+}
+
+function makeFallbackFocusResult(text, maxSearchPartLen, method, error) {
+  const githubSearchQuery = fallbackFocusedQuery(text, maxSearchPartLen);
+  return {
+    githubSearchQuery,
+    codeKeyword: reconcileCodeKeyword("", text, githubSearchQuery),
+    wasFocused: true,
+    method,
+    error,
+  };
+}
+
+function parseFocusResponse(raw, maxSearchPartLen, sourceText) {
+  try {
+    const parsed = JSON.parse(raw);
+    let githubSearchQuery = String(parsed.githubSearchQuery || "")
+      .trim()
+      .replace(/"/g, "");
+    if (!githubSearchQuery) return null;
+    githubSearchQuery = truncateSearchPart(githubSearchQuery, maxSearchPartLen);
+    const codeKeyword = reconcileCodeKeyword(parsed.codeKeyword, sourceText, githubSearchQuery);
+    return { githubSearchQuery, codeKeyword };
+  } catch {
+    return null;
+  }
+}
+
+async function extractProblemQuery(text, openaiKey, maxSearchPartLen = MAX_QUERY_LENGTH) {
   let resp;
   try {
     resp = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -147,60 +339,104 @@ async function extractProblemQuery(text, openaiKey) {
         model: "gpt-5.4-nano",
         messages: [
           { role: "system", content: EXTRACT_SYSTEM_PROMPT },
-          { role: "user", content: text },
+          { role: "user", content: text + CODE_KEYWORD_USER_SUFFIX },
         ],
-        max_completion_tokens: 150,
+        response_format: { type: "json_object" },
+        max_completion_tokens: 200,
         temperature: 0.3,
       }),
     });
   } catch (err) {
-    return {
-      text: fallbackFocusedQuery(text),
-      wasFocused: true,
-      method: "network_error",
-      error: err.message,
-    };
+    return makeFallbackFocusResult(text, maxSearchPartLen, "network_error", err.message);
   }
 
   if (!resp.ok) {
     const body = await resp.json().catch(() => ({}));
-    return {
-      text: fallbackFocusedQuery(text),
-      wasFocused: true,
-      method: "api_error",
-      error: `${resp.status}: ${body.error?.message || resp.statusText}`,
-    };
+    return makeFallbackFocusResult(
+      text,
+      maxSearchPartLen,
+      "api_error",
+      `${resp.status}: ${body.error?.message || resp.statusText}`
+    );
   }
 
   const data = await resp.json();
-  const summary = (data.choices?.[0]?.message?.content || "")
-    .trim()
-    .replace(/"/g, "");
-
-  if (!summary || summary.length > MAX_QUERY_LENGTH) {
-    return { text: fallbackFocusedQuery(text), wasFocused: true, method: "bad_summary" };
+  const raw = (data.choices?.[0]?.message?.content || "").trim();
+  const parsed = parseFocusResponse(raw, maxSearchPartLen, text);
+  if (!parsed) {
+    return makeFallbackFocusResult(text, maxSearchPartLen, "bad_summary");
   }
 
-  return { text: summary, wasFocused: true, method: "llm" };
+  return { ...parsed, wasFocused: true, method: "llm" };
 }
 
-async function focusSearchQuery(text, openaiKey) {
+async function focusSearchQuery(text, openaiKey, maxSearchPartLen = MAX_QUERY_LENGTH) {
   if (openaiKey) {
-    return extractProblemQuery(text, openaiKey);
+    return extractProblemQuery(text, openaiKey, maxSearchPartLen);
   }
-  return { text: fallbackFocusedQuery(text), wasFocused: true, method: "no_key" };
+  return makeFallbackFocusResult(text, maxSearchPartLen, "no_key");
 }
 
-function updateFocusedQueryCount() {
+function updatePrKeywordCount() {
+  const len = prKeywordInput.value.length;
+  prKeywordCountEl.textContent = `${len}/${MAX_CODE_KEYWORD_LENGTH}`;
+}
+
+function setPrKeywordValue(keyword) {
+  const k = String(keyword || "").trim().slice(0, MAX_CODE_KEYWORD_LENGTH);
+  prKeywordInput.value = k;
+  lastCodeKeyword = k;
+  updatePrKeywordCount();
+  showPrKeywordError("");
+}
+
+function getPrKeywordText() {
+  const fromInput = prKeywordInput.value.trim();
+  if (fromInput) return fromInput;
+  return (lastCodeKeyword || "").trim();
+}
+
+function showPrKeywordError(message) {
+  if (message) {
+    prKeywordErrorEl.textContent = message;
+    prKeywordErrorEl.hidden = false;
+  } else {
+    prKeywordErrorEl.textContent = "";
+    prKeywordErrorEl.hidden = true;
+  }
+}
+
+function getPrSearchText(issueSearchText) {
+  const raw = getPrKeywordText();
+  if (raw) return raw;
+  return (lastCodeKeyword || deriveCodeKeyword(issueSearchText)).trim();
+}
+
+function updateFocusedQueryCount(maxLen = focusedQueryInput.maxLength || MAX_QUERY_LENGTH) {
   const len = focusedQueryInput.value.length;
-  focusedQueryCountEl.textContent = `${len}/${MAX_QUERY_LENGTH}`;
+  focusedQueryCountEl.textContent = `${len}/${maxLen}`;
 }
 
-function setFocusedQueryValue(text) {
-  const value = (text || "").slice(0, MAX_QUERY_LENGTH);
+function applyFocusedQueryBudget(settings) {
+  const maxLen = minFocusedSearchPartBudget(settings.scopeType, settings.scopeValue);
+  focusedQueryInput.maxLength = maxLen;
+  if (focusedQueryInput.value.length > maxLen) {
+    const value = truncateSearchPart(focusedQueryInput.value, maxLen);
+    focusedQueryInput.value = value;
+    lastFocusedText = value;
+  }
+  updateFocusedQueryCount(maxLen);
+}
+
+function setFocusedQueryValue(text, settings = null) {
+  const maxLen = settings
+    ? minFocusedSearchPartBudget(settings.scopeType, settings.scopeValue)
+    : focusedQueryInput.maxLength || MAX_QUERY_LENGTH;
+  focusedQueryInput.maxLength = maxLen;
+  const value = truncateSearchPart(text || "", maxLen);
   focusedQueryInput.value = value;
   lastFocusedText = value;
-  updateFocusedQueryCount();
+  updateFocusedQueryCount(maxLen);
 }
 
 function getFocusedSearchText() {
@@ -219,7 +455,7 @@ function showFocusedQueryError(message) {
   }
 }
 
-function showFocusNotice(method, searchPart, error, originalLength) {
+function showFocusNotice(method, searchPart, error, originalLength, settings = null) {
   const labels = {
     llm: "Focused on problem (AI)",
     no_key: "Focused with basic cleanup — add OpenAI key for better results",
@@ -234,7 +470,7 @@ function showFocusNotice(method, searchPart, error, originalLength) {
       ? ` Original selection was ${originalLength} chars (limit: ${MAX_QUERY_LENGTH}).`
       : "";
   focusNoticeStatusEl.innerHTML = `<strong>${escapeHtml(methodLabel)}</strong>${lengthNote ? ` &mdash;${lengthNote}` : ""}`;
-  setFocusedQueryValue(searchPart);
+  setFocusedQueryValue(searchPart, settings);
   noticeEl.classList.add("visible");
   showFocusedQueryError("");
 }
@@ -245,9 +481,9 @@ function hideSummarizeNotice() {
   showFocusedQueryError("");
 }
 
-function showQueryAdjustedNotice(message, adjustedQuery) {
+function showQueryAdjustedNotice(message, adjustedQuery, settings = null) {
   focusNoticeStatusEl.innerHTML = `<strong>${escapeHtml(message)}</strong>`;
-  setFocusedQueryValue(adjustedQuery);
+  setFocusedQueryValue(adjustedQuery, settings);
   noticeEl.classList.add("visible");
   showFocusedQueryError("");
 }
@@ -282,23 +518,50 @@ function getSearchPart(text, { sanitize = false } = {}) {
     : trimmed;
 }
 
-function buildQuery(text, scopeType, scopeValue, filters = {}, { sanitize = false } = {}) {
-  const searchPart = getSearchPart(text, { sanitize });
-  let q = searchPart + " is:issue";
-  if (filters.issueState === "open") {
-    q += " is:open";
-  } else if (filters.issueState === "closed") {
-    q += " is:closed";
+function buildQuerySuffix(scopeType, scopeValue, filters, itemType) {
+  let suffix = itemType === "pr" ? " is:pr" : " is:issue";
+  const state = itemType === "pr" ? filters.prState : filters.issueState;
+  if (state === "open") {
+    suffix += " is:open";
+  } else if (state === "closed") {
+    suffix += " is:closed";
   }
-  if (filters.featureRequestsOnly) {
-    q += ` label:"${FEATURE_REQUEST_LABEL}"`;
+  if (itemType === "issue" && filters.featureRequestsOnly) {
+    suffix += ` label:"${FEATURE_REQUEST_LABEL}"`;
   }
   if (scopeType === "org" && scopeValue) {
-    q += ` org:${scopeValue}`;
+    suffix += ` org:${scopeValue}`;
   } else if (scopeType === "repo" && scopeValue) {
-    q += ` repo:${scopeValue}`;
+    suffix += ` repo:${scopeValue}`;
   }
-  return q;
+  return suffix;
+}
+
+function maxSearchPartLength(scopeType, scopeValue, filters, itemType) {
+  return Math.max(1, MAX_QUERY_LENGTH - buildQuerySuffix(scopeType, scopeValue, filters, itemType).length);
+}
+
+function minFocusedSearchPartBudget(scopeType, scopeValue) {
+  return maxSearchPartLength(scopeType, scopeValue, getIssueSearchFilters(), "issue");
+}
+
+function truncateSearchPart(searchPart, maxLen) {
+  if (!searchPart || searchPart.length <= maxLen) return searchPart;
+  if (maxLen <= 3) return searchPart.slice(0, maxLen);
+  return searchPart.slice(0, maxLen - 3).trimEnd() + "...";
+}
+
+function buildQuery(
+  text,
+  scopeType,
+  scopeValue,
+  filters = {},
+  { sanitize = false, itemType = "issue" } = {}
+) {
+  const suffix = buildQuerySuffix(scopeType, scopeValue, filters, itemType);
+  const maxLen = Math.max(1, MAX_QUERY_LENGTH - suffix.length);
+  const searchPart = truncateSearchPart(getSearchPart(text, { sanitize }), maxLen);
+  return searchPart + suffix;
 }
 
 function truncate(text, max) {
@@ -440,7 +703,7 @@ function queryTermsInDoc(queryTokens, docTokens) {
 const WEAK_MATCH_MIN_QUERY_TERMS = 3;
 const WEAK_MATCH_COVERAGE_THRESHOLD = 0.35;
 
-function buildWeakMatchNotice(rankedItems) {
+function buildWeakMatchNotice(rankedItems, itemKind = "issue") {
   if (!rankedItems.length) return null;
   const top = rankedItems[0];
   const { queryTokens, docTokens } = top;
@@ -462,7 +725,7 @@ function buildWeakMatchNotice(rankedItems) {
   const shown = missing.slice(0, 8);
   const extra = missing.length > shown.length ? ` (+${missing.length - shown.length} more)` : "";
   return (
-    "Top result may be a weak match — few keywords from your query appear in that issue. " +
+    `Top result may be a weak match — few keywords from your query appear in that ${itemKind}. ` +
     `Not found in #1: ${shown.join(", ")}${extra}. ` +
     "Scores are relative to GitHub’s result set, not a guarantee of relevance."
   );
@@ -515,27 +778,33 @@ function repoFromUrl(url) {
   return m ? m[1] : "";
 }
 
-function renderResults(rankedItems) {
+function renderGitHubResults(
+  rankedItems,
+  { statusEl: colStatus, metaEl: colMeta, resultsEl: colResults, emptyMessage, countLabel, itemKind, extraMetaHtml = "" }
+) {
   if (!rankedItems.length) {
-    statusEl.textContent = "No issues found for this query.";
+    colStatus.textContent = emptyMessage;
+    colMeta.innerHTML = "";
+    colResults.innerHTML = "";
     return;
   }
 
-  statusEl.innerHTML = "";
-  resultsEl.innerHTML = "";
+  colStatus.innerHTML = "";
+  colMeta.innerHTML = extraMetaHtml || "";
+  colResults.innerHTML = "";
 
-  const weakNotice = buildWeakMatchNotice(rankedItems);
+  const weakNotice = buildWeakMatchNotice(rankedItems, itemKind);
   if (weakNotice) {
     const weakEl = document.createElement("div");
     weakEl.className = "weak-match-notice";
     weakEl.textContent = weakNotice;
-    resultsEl.appendChild(weakEl);
+    colMeta.appendChild(weakEl);
   }
 
   const countEl = document.createElement("div");
   countEl.className = "result-count";
-  countEl.textContent = `${rankedItems.length} issue${rankedItems.length !== 1 ? "s" : ""} found \u00b7 ranked locally among GitHub results`;
-  resultsEl.appendChild(countEl);
+  countEl.textContent = `${rankedItems.length} ${countLabel} found \u00b7 ranked locally among GitHub results`;
+  colMeta.appendChild(countEl);
 
   for (const { issue, rank, total } of rankedItems) {
     const repo = repoFromUrl(issue.html_url);
@@ -573,8 +842,33 @@ function renderResults(rankedItems) {
         <span class="card-meta">updated ${relativeTime(issue.updated_at)}</span>
       </div>
     `;
-    resultsEl.appendChild(card);
+    colResults.appendChild(card);
   }
+}
+
+function renderResults(rankedItems) {
+  renderGitHubResults(rankedItems, {
+    statusEl,
+    metaEl: issuesMetaEl,
+    resultsEl,
+    emptyMessage: "No issues found for this query.",
+    countLabel: rankedItems.length === 1 ? "issue" : "issues",
+    itemKind: "issue",
+  });
+}
+
+function renderPrResults(rankedItems, { prSearchNote = "" } = {}) {
+  renderGitHubResults(rankedItems, {
+    statusEl: prStatusEl,
+    metaEl: prMetaEl,
+    resultsEl: prResultsEl,
+    emptyMessage: "No pull requests found for this query.",
+    countLabel: rankedItems.length === 1 ? "pull request" : "pull requests",
+    itemKind: "pull request",
+    extraMetaHtml: prSearchNote
+      ? `<div class="pr-search-adjusted">${escapeHtml(prSearchNote)}</div>`
+      : "",
+  });
 }
 
 function escapeHtml(str) {
@@ -590,13 +884,61 @@ function escapeAttr(str) {
 function showError(msg) {
   statusEl.className = "status error";
   statusEl.innerHTML = msg;
+  issuesMetaEl.innerHTML = "";
   resultsEl.innerHTML = "";
 }
 
 function showLoading() {
+  issuesMetaEl.innerHTML = "";
   resultsEl.innerHTML = "";
   statusEl.className = "status";
-  statusEl.innerHTML = `<div class="spinner"></div>Searching...`;
+  statusEl.innerHTML = `<div class="spinner"></div>Searching issues...`;
+}
+
+function showPrError(msg) {
+  prStatusEl.className = "status error";
+  prStatusEl.innerHTML = msg;
+  prMetaEl.innerHTML = "";
+  prResultsEl.innerHTML = "";
+}
+
+function showPrLoading(adjustmentNote = "") {
+  prMetaEl.innerHTML = "";
+  prResultsEl.innerHTML = "";
+  prStatusEl.className = "status";
+  const adjNote = adjustmentNote
+    ? ` <span class="pr-search-adjusted">${escapeHtml(adjustmentNote)}</span>`
+    : "";
+  prStatusEl.innerHTML = `<div class="spinner"></div>Searching pull requests...${adjNote}`;
+}
+
+function buildPrSearchAttempts(codeKeyword, formattedPrimary, issueSearchText, sourceText, settings, filters) {
+  const seen = new Set();
+  const attempts = [];
+  const add = (query, display) => {
+    const q = String(query || "").trim();
+    if (!q || seen.has(q)) return;
+    seen.add(q);
+    attempts.push({
+      query: q,
+      display: String(display || q).trim() || q,
+    });
+  };
+
+  add(formattedPrimary, codeKeyword);
+  const derived = deriveCodeKeyword(issueSearchText);
+  add(formatPrSearchText(derived, sourceText), derived);
+  const phrase = derivePrPhraseFromQuery(issueSearchText, settings, filters);
+  add(phrase, phrase);
+  const maxLen = maxSearchPartLength(
+    settings.scopeType,
+    settings.scopeValue,
+    filters,
+    "pr"
+  );
+  add(truncateSearchPart(issueSearchText, Math.min(80, maxLen)), truncateSearchPart(issueSearchText, 40));
+
+  return attempts;
 }
 
 function showDeepWikiLoading() {
@@ -779,19 +1121,20 @@ async function runContext7Search(topic) {
   }
 }
 
-async function searchGitHubIssues(query, searchText, settings, focusMeta, filters) {
-  const { focusMethod, focusError, originalLength } = focusMeta;
-
+async function fetchRankedGitHubItems({ itemType, searchText, settings, filters }) {
   const trimmedForQuery = searchText.trim();
   const autoSanitized = GITHUB_SEARCH_SPECIAL.test(trimmedForQuery);
   const queryAttempts = [
     {
-      query: buildQuery(searchText, settings.scopeType, settings.scopeValue, filters),
+      query: buildQuery(searchText, settings.scopeType, settings.scopeValue, filters, {
+        itemType,
+      }),
       sanitized: autoSanitized,
     },
     {
       query: buildQuery(searchText, settings.scopeType, settings.scopeValue, filters, {
         sanitize: true,
+        itemType,
       }),
       sanitized: true,
     },
@@ -803,7 +1146,17 @@ async function searchGitHubIssues(query, searchText, settings, focusMeta, filter
 
   for (let i = 0; i < queryAttempts.length; i++) {
     const { query: fullQuery, sanitized } = queryAttempts[i];
-    const url = `https://api.github.com/search/issues?q=${encodeURIComponent(fullQuery)}&search_type=${searchType}&per_page=30`;
+    const params = new URLSearchParams({
+      q: fullQuery,
+      per_page: "30",
+    });
+    if (itemType === "issue") {
+      params.set("search_type", searchType);
+    } else {
+      params.set("sort", "updated");
+      params.set("order", "desc");
+    }
+    const url = `https://api.github.com/search/issues?${params}`;
 
     resp = await fetch(url, {
       headers: {
@@ -831,15 +1184,16 @@ async function searchGitHubIssues(query, searchText, settings, focusMeta, filter
     if (!isSyntaxError || i === queryAttempts.length - 1) break;
   }
 
+  const optionsLinkId = itemType === "pr" ? "open-options-pr" : "open-options";
+
   if (resp.status === 401) {
-    showError(
-      'Invalid GitHub token. <a href="#" id="open-options">Update settings</a>.'
-    );
-    document.getElementById("open-options")?.addEventListener("click", (e) => {
-      e.preventDefault();
-      chrome.runtime.openOptionsPage();
-    });
-    return;
+    return {
+      ok: false,
+      ranked: [],
+      usedSanitizedQuery,
+      errorHtml: `Invalid GitHub token. <a href="#" id="${optionsLinkId}">Update settings</a>.`,
+      optionsLinkId,
+    };
   }
 
   if (resp.status === 403) {
@@ -849,8 +1203,11 @@ async function searchGitHubIssues(query, searchText, settings, focusMeta, filter
       const resetDate = new Date(parseInt(resetHeader, 10) * 1000);
       extra = ` Resets at ${resetDate.toLocaleTimeString()}.`;
     }
-    showError(`Rate limit exceeded.${extra} Semantic search is limited to 10 requests/minute.`);
-    return;
+    const rateMsg =
+      itemType === "issue"
+        ? `Rate limit exceeded.${extra} Semantic search is limited to 10 requests/minute.`
+        : `Rate limit exceeded.${extra}`;
+    return { ok: false, ranked: [], usedSanitizedQuery, errorHtml: rateMsg };
   }
 
   if (!resp.ok) {
@@ -859,38 +1216,214 @@ async function searchGitHubIssues(query, searchText, settings, focusMeta, filter
       .filter(Boolean)
       .join(" ");
     const msg = detail || body.message || "Unknown error";
-    showError(`GitHub API error ${resp.status}: ${escapeHtml(msg)}`);
-    return;
-  }
-
-  const sentSearchPart = getSearchPart(searchText);
-  if (focusMethod && focusMethod !== "manual") {
-    showFocusNotice(focusMethod, sentSearchPart, focusError, originalLength);
-  } else if (usedSanitizedQuery) {
-    showQueryAdjustedNotice("GitHub syntax adjusted", sentSearchPart);
-  } else if (focusMethod === "manual") {
-    showFocusNotice("manual", sentSearchPart, focusError, originalLength);
+    return {
+      ok: false,
+      ranked: [],
+      usedSanitizedQuery,
+      errorHtml: `GitHub API error ${resp.status}: ${escapeHtml(msg)}`,
+    };
   }
 
   const data = await resp.json();
-  const issuesOnly = (data.items || []).filter((item) => !item.pull_request);
-  const originalQuery = query.trim();
-  const ranked = rankIssuesByRelevance(issuesOnly, originalQuery, searchText);
-  renderResults(ranked);
+  const items =
+    itemType === "pr"
+      ? (data.items || []).filter((item) => item.pull_request)
+      : (data.items || []).filter((item) => !item.pull_request);
+  const trimmedSearchText = searchText.trim();
+  const ranked = rankIssuesByRelevance(items, trimmedSearchText, searchText);
+  return { ok: true, ranked, usedSanitizedQuery };
 }
 
-async function runGitHubAndDeepWiki(sourceQuery, searchText, settings, focusMeta) {
-  const filters = getSearchFilters();
+async function searchGitHubItems({
+  itemType,
+  searchText,
+  settings,
+  filters,
+  focusMeta,
+  showErrorFn,
+  renderFn,
+}) {
+  const result = await fetchRankedGitHubItems({ itemType, searchText, settings, filters });
+
+  if (!result.ok) {
+    showErrorFn(result.errorHtml);
+    if (result.optionsLinkId) {
+      document.getElementById(result.optionsLinkId)?.addEventListener("click", (e) => {
+        e.preventDefault();
+        chrome.runtime.openOptionsPage();
+      });
+    }
+    return;
+  }
+
+  if (itemType === "issue" && focusMeta) {
+    const { focusMethod, focusError, originalLength } = focusMeta;
+    const sentSearchPart = getSearchPart(searchText);
+    if (focusMethod && focusMethod !== "manual") {
+      showFocusNotice(focusMethod, sentSearchPart, focusError, originalLength, settings);
+    } else if (result.usedSanitizedQuery) {
+      showQueryAdjustedNotice("GitHub syntax adjusted", sentSearchPart, settings);
+    } else if (focusMethod === "manual") {
+      showFocusNotice("manual", sentSearchPart, focusError, originalLength, settings);
+    }
+  }
+
+  renderFn(result.ranked);
+}
+
+async function searchGitHubIssues(searchText, settings, focusMeta, filters) {
+  await searchGitHubItems({
+    itemType: "issue",
+    searchText,
+    settings,
+    filters,
+    focusMeta,
+    showErrorFn: showError,
+    renderFn: renderResults,
+  });
+}
+
+async function searchGitHubPullRequests(
+  codeKeyword,
+  formattedPrQuery,
+  issueSearchText,
+  sourceText,
+  settings,
+  filters
+) {
+  const attempts = buildPrSearchAttempts(
+    codeKeyword,
+    formattedPrQuery,
+    issueSearchText,
+    sourceText,
+    settings,
+    filters
+  );
+  if (!attempts.length) {
+    renderPrResults([]);
+    return;
+  }
+
+  let firstDisplay = attempts[0].display;
+  showPrLoading();
+
+  for (let i = 0; i < attempts.length; i++) {
+    const { query, display } = attempts[i];
+    if (i > 0) {
+      showPrLoading("Broadening search after no results");
+    }
+
+    const result = await fetchRankedGitHubItems({
+      itemType: "pr",
+      searchText: query,
+      settings,
+      filters,
+    });
+
+    if (!result.ok) {
+      showPrError(result.errorHtml);
+      if (result.optionsLinkId) {
+        document.getElementById(result.optionsLinkId)?.addEventListener("click", (e) => {
+          e.preventDefault();
+          chrome.runtime.openOptionsPage();
+        });
+      }
+      return;
+    }
+
+    if (result.ranked.length > 0) {
+      const usedFallback = i > 0;
+      renderPrResults(result.ranked, {
+        prSearchNote: usedFallback
+          ? `No PRs for "${firstDisplay}"; results use "${display}".`
+          : "",
+      });
+      return;
+    }
+  }
+
+  renderPrResults([]);
+}
+
+async function runGitHubAndDeepWiki(githubSearchQuery, codeKeyword, settings, focusMeta) {
+  const issueSearchText = (getFocusedSearchText() || githubSearchQuery).trim();
+  const sourceText = lastSourceQuery.trim();
+  const prKeyword = resolvePrKeywordForSearch(
+    codeKeyword || getPrKeywordText(),
+    sourceText,
+    issueSearchText
+  );
+  setPrKeywordValue(prKeyword);
+  const formattedPrQuery = formatPrSearchText(prKeyword, sourceText).trim() || prKeyword;
+  showPrLoading();
+  const issueFilters = getIssueSearchFilters();
+  const prFilters = getPrSearchFilters();
   await Promise.allSettled([
-    searchGitHubIssues(sourceQuery, searchText, settings, focusMeta, filters),
-    runDeepWikiSearch(searchText, settings),
-    runContext7Search(searchText),
+    searchGitHubIssues(issueSearchText, settings, focusMeta, issueFilters),
+    searchGitHubPullRequests(
+      prKeyword,
+      formattedPrQuery,
+      issueSearchText,
+      sourceText,
+      settings,
+      prFilters
+    ),
+    runDeepWikiSearch(issueSearchText, settings),
+    runContext7Search(issueSearchText),
   ]);
 }
 
 function rerunSearchWithoutRefocus() {
   if (!lastSourceQuery.trim() && !getFocusedSearchText()) return;
   doSearch(lastSourceQuery || queryInput.value, { refocus: false });
+}
+
+async function rerunPrSearchOnly() {
+  const issueSearchText = getFocusedSearchText();
+  if (!issueSearchText) {
+    showPrKeywordError("Run a search first, or set a GitHub issue query.");
+    return;
+  }
+
+  const sanitized = sanitizeManualPrKeyword(getPrKeywordText());
+  if (sanitized.error) {
+    showPrKeywordError(sanitized.error);
+    return;
+  }
+  showPrKeywordError("");
+
+  const settings = await getSettings();
+  if (!settings.githubToken) {
+    const noTokenMsg =
+      'No GitHub token configured. <a href="#" id="open-options-pr">Open settings</a> to add one.';
+    showPrError(noTokenMsg);
+    document.getElementById("open-options-pr")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.runtime.openOptionsPage();
+    });
+    return;
+  }
+
+  const codeKeyword = sanitized.keyword;
+  lastCodeKeyword = codeKeyword;
+  setPrKeywordValue(codeKeyword);
+
+  const sourceText = lastSourceQuery.trim();
+  const formattedPrQuery = formatPrSearchText(codeKeyword, sourceText).trim() || codeKeyword;
+  showPrLoading();
+
+  try {
+    await searchGitHubPullRequests(
+      codeKeyword,
+      formattedPrQuery,
+      issueSearchText,
+      sourceText,
+      settings,
+      getPrSearchFilters()
+    );
+  } catch (err) {
+    showPrError(`Network error: ${escapeHtml(err.message)}`);
+  }
 }
 
 async function doSearch(sourceQuery, { refocus = true } = {}) {
@@ -925,14 +1458,20 @@ async function doSearch(sourceQuery, { refocus = true } = {}) {
     hideSummarizeNotice();
   }
   showLoading();
+  showPrLoading();
 
   const settings = await getSettings();
 
   if (!settings.githubToken) {
-    showError(
-      'No GitHub token configured. <a href="#" id="open-options">Open settings</a> to add one.'
-    );
+    const noTokenMsg =
+      'No GitHub token configured. <a href="#" id="open-options">Open settings</a> to add one.';
+    showError(noTokenMsg);
+    showPrError(noTokenMsg.replace('id="open-options"', 'id="open-options-pr"'));
     document.getElementById("open-options")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      chrome.runtime.openOptionsPage();
+    });
+    document.getElementById("open-options-pr")?.addEventListener("click", (e) => {
       e.preventDefault();
       chrome.runtime.openOptionsPage();
     });
@@ -942,31 +1481,51 @@ async function doSearch(sourceQuery, { refocus = true } = {}) {
   }
 
   let searchText;
+  let codeKeyword = "";
   let focusMethod = null;
   let focusError = null;
   const originalLength = trimmedSource.length;
 
   if (refocus) {
     searchText = trimmedSource;
+    applyFocusedQueryBudget(settings);
+    const maxSearchPartLen = minFocusedSearchPartBudget(settings.scopeType, settings.scopeValue);
     statusEl.innerHTML = `<div class="spinner"></div>Extracting problem from selection...`;
+    showPrLoading("");
     try {
-      const focusResult = await focusSearchQuery(searchText, settings.openaiKey);
-      searchText = focusResult.text;
+      const focusResult = await focusSearchQuery(searchText, settings.openaiKey, maxSearchPartLen);
+      searchText = focusResult.githubSearchQuery;
+      codeKeyword = focusResult.codeKeyword;
+      lastCodeKeyword = codeKeyword;
       focusMethod = focusResult.method;
       focusError = focusResult.error;
     } catch (err) {
-      searchText = fallbackFocusedQuery(searchText);
-      focusMethod = "network_error";
-      focusError = err.message;
+      const fallback = makeFallbackFocusResult(
+        searchText,
+        maxSearchPartLen,
+        "network_error",
+        err.message
+      );
+      searchText = fallback.githubSearchQuery;
+      codeKeyword = fallback.codeKeyword;
+      lastCodeKeyword = codeKeyword;
+      focusMethod = fallback.method;
+      focusError = fallback.error;
     }
-    setFocusedQueryValue(searchText);
+    setFocusedQueryValue(searchText, settings);
+    setPrKeywordValue(codeKeyword);
     noticeEl.classList.add("visible");
   } else {
+    applyFocusedQueryBudget(settings);
     searchText = getFocusedSearchText();
     lastFocusedText = searchText;
+    const sourceText = lastSourceQuery.trim();
+    codeKeyword = resolvePrKeywordForSearch(getPrKeywordText(), sourceText, searchText);
+    setPrKeywordValue(codeKeyword);
   }
 
   showLoading();
+  showPrLoading();
   resetDeepWikiColumn(settings.deepwikiRepo || "");
   resetContext7Section();
 
@@ -977,9 +1536,11 @@ async function doSearch(sourceQuery, { refocus = true } = {}) {
   };
 
   try {
-    await runGitHubAndDeepWiki(trimmedSource || lastSourceQuery, searchText, settings, focusMeta);
+    await runGitHubAndDeepWiki(searchText, codeKeyword, settings, focusMeta);
   } catch (err) {
-    showError(`Network error: ${escapeHtml(err.message)}`);
+    const networkMsg = `Network error: ${escapeHtml(err.message)}`;
+    showError(networkMsg);
+    showPrError(networkMsg);
   } finally {
     searchBtn.disabled = false;
     focusedSearchBtn.disabled = false;
@@ -1007,32 +1568,50 @@ focusedQueryInput.addEventListener("input", () => {
 });
 
 focusedQueryInput.addEventListener("paste", (e) => {
+  const maxLen = focusedQueryInput.maxLength || MAX_QUERY_LENGTH;
   const pasted = (e.clipboardData || window.clipboardData).getData("text");
   const selectionLen =
     focusedQueryInput.selectionEnd - focusedQueryInput.selectionStart;
   const nextLen = focusedQueryInput.value.length - selectionLen + pasted.length;
-  if (nextLen > MAX_QUERY_LENGTH) {
+  if (nextLen > maxLen) {
     e.preventDefault();
-    const available = MAX_QUERY_LENGTH - (focusedQueryInput.value.length - selectionLen);
+    const available = maxLen - (focusedQueryInput.value.length - selectionLen);
     const trimmed = pasted.slice(0, available);
     const start = focusedQueryInput.selectionStart;
     const end = focusedQueryInput.selectionEnd;
     focusedQueryInput.setRangeText(trimmed, start, end, "end");
-    updateFocusedQueryCount();
+    updateFocusedQueryCount(maxLen);
   }
 });
 
-stateBtns.forEach((btn) => {
+issueStateBtns.forEach((btn) => {
   btn.addEventListener("click", () => {
-    stateBtns.forEach((b) => b.classList.remove("active"));
+    issueStateBtns.forEach((b) => b.classList.remove("active"));
     btn.classList.add("active");
-    saveFilterPrefs();
+    saveIssueFilterPrefs();
     rerunSearchWithoutRefocus();
   });
 });
 
+prStateBtns.forEach((btn) => {
+  btn.addEventListener("click", () => {
+    prStateBtns.forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    savePrFilterPrefs();
+    rerunPrSearchOnly();
+  });
+});
+
+prKeywordSearchBtn.addEventListener("click", () => rerunPrSearchOnly());
+
+prKeywordInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") rerunPrSearchOnly();
+});
+
+prKeywordInput.addEventListener("input", () => updatePrKeywordCount());
+
 featureRequestsCheckbox.addEventListener("change", () => {
-  saveFilterPrefs();
+  saveIssueFilterPrefs();
   rerunSearchWithoutRefocus();
 });
 

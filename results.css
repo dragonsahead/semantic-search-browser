@@ -17,7 +17,6 @@ header {
 }
 
 .header-inner {
-  max-width: 1400px;
   margin: 0 auto;
   display: flex;
   align-items: center;
@@ -33,20 +32,52 @@ h1 { font-size: 18px; font-weight: 600; }
 .settings-link:hover { color: #e6edf3; }
 
 main {
-  max-width: 1400px;
   margin: 0 auto;
   padding: 24px;
 }
 
 .results-split {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 1.5rem;
-  align-items: start;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 1.25rem;
+  grid-template-rows: auto auto 1fr;
 }
 
 .results-column {
+  display: grid;
+  grid-template-rows: subgrid;
+  grid-row: 1 / -1;
   min-width: 0;
+}
+
+.column-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.column-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 12px;
+}
+
+.column-header .search-type-toggle {
+  margin-bottom: 0;
+}
+
+.column-header .column-heading {
+  margin-bottom: 0;
+}
+
+.column-header-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
 }
 
 .column-heading {
@@ -55,24 +86,15 @@ main {
   color: #8b949e;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  margin-bottom: 12px;
 }
 
-#github-column .status {
+.results-column > .status {
   text-align: left;
   padding: 12px 0;
 }
 
-.deepwiki-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.deepwiki-header .column-heading {
-  margin-bottom: 0;
+.results-column > .status:empty {
+  display: none;
 }
 
 .deepwiki-repo-label {
@@ -81,9 +103,30 @@ main {
   font-family: ui-monospace, monospace;
 }
 
-.deepwiki-status {
-  text-align: left;
-  padding: 12px 0;
+.column-body {
+  min-width: 0;
+}
+
+.column-meta:empty {
+  display: none;
+}
+
+.column-meta .result-count {
+  margin-bottom: 16px;
+}
+
+.column-meta .weak-match-notice {
+  margin-bottom: 12px;
+}
+
+.column-meta .pr-search-adjusted,
+.status .pr-search-adjusted {
+  font-size: 13px;
+  color: #8b949e;
+}
+
+.column-meta .pr-search-adjusted {
+  margin-bottom: 12px;
 }
 
 .deepwiki-stream {
@@ -186,9 +229,30 @@ main {
   text-decoration: underline;
 }
 
+@media (max-width: 1100px) {
+  .results-split {
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: none;
+  }
+
+  .results-column {
+    display: block;
+    grid-template-rows: none;
+    grid-row: auto;
+  }
+
+  #deepwiki-column {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 900px) {
   .results-split {
     grid-template-columns: 1fr;
+  }
+
+  #deepwiki-column {
+    grid-column: auto;
   }
 }
 
@@ -348,7 +412,6 @@ main {
   border: 1px solid rgba(210, 153, 34, 0.35);
   border-radius: 6px;
   padding: 10px 12px;
-  margin-bottom: 12px;
   line-height: 1.45;
 }
 
@@ -420,15 +483,6 @@ main {
 }
 
 .summarize-notice.visible { display: block; }
-
-/* Filter bar */
-.filter-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 16px;
-}
 
 .feature-requests-label {
   display: flex;
@@ -522,5 +576,78 @@ main {
 }
 
 .focused-query-error[hidden] {
+  display: none;
+}
+
+/* PR keyword (above pull request column) */
+.pr-keyword-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #21262d;
+}
+
+.pr-keyword-label {
+  font-size: 12px;
+  color: #8b949e;
+  font-weight: 500;
+}
+
+.pr-keyword-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.pr-keyword-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  font-size: 14px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e6edf3;
+  outline: none;
+}
+
+.pr-keyword-input:focus {
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 3px rgba(56, 139, 253, 0.15);
+}
+
+.pr-keyword-count {
+  font-size: 12px;
+  color: #8b949e;
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+}
+
+.pr-keyword-search-btn {
+  align-self: flex-start;
+  background: #21262d;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.pr-keyword-search-btn:hover {
+  background: #30363d;
+  border-color: #8b949e;
+}
+
+.pr-keyword-error {
+  margin: 0;
+  font-size: 12px;
+  color: #f85149;
+}
+
+.pr-keyword-error[hidden] {
   display: none;
 }
